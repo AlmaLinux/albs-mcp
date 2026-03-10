@@ -135,14 +135,13 @@ class ALBSClient:
         e = min(total, end_line)
         return "\n".join(all_lines[s:e]), total
 
-    # ── Authenticated (JWT required) ──────────────────────────────────
-
     async def get_flavors(self) -> dict[str, int]:
-        r = await self._http.get(
-            f"{ALBS_API}/platform_flavors/", headers=self._auth_headers
-        )
+        """Get {flavor_name: flavor_id} mapping from ALBS."""
+        r = await self._http.get(f"{ALBS_API}/platform_flavors/")
         r.raise_for_status()
         return {f["name"]: f["id"] for f in r.json()}
+
+    # ── Authenticated (JWT required) ──────────────────────────────────
 
     async def get_sign_keys(self) -> list[dict[str, Any]]:
         """Get available sign keys. Requires JWT."""
@@ -250,7 +249,13 @@ class ALBSClient:
             data.setdefault("mock_options", {})["module_enable"] = modules
         if additional_flavors:
             flavors = await self.get_flavors()
-            flav_ids = [flavors[f] for f in additional_flavors if f in flavors]
+            unknown = [f for f in additional_flavors if f not in flavors]
+            if unknown:
+                raise ValueError(
+                    f"Unknown flavor(s): {unknown}. "
+                    f"Available: {sorted(flavors)}"
+                )
+            flav_ids = [flavors[f] for f in additional_flavors]
             data.setdefault("platform_flavors", []).extend(flav_ids)
 
         r = await self._http.post(

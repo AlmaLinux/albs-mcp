@@ -363,9 +363,31 @@ async def get_sign_keys() -> str:
 
 
 @mcp.tool()
+async def get_flavors() -> str:
+    """List all available platform flavors on ALBS.
+
+    Returns flavor names and IDs, useful for verifying correct flavor names
+    before creating builds with the flavors parameter.
+    """
+    client = _get_client()
+    try:
+        flavors = await client.get_flavors()
+        if not flavors:
+            return "No flavors available."
+        lines = [f"Platform flavors ({len(flavors)}):", ""]
+        for name, fid in sorted(flavors.items(), key=lambda x: x[0].lower()):
+            lines.append(f"  id={fid:3d}  {name}")
+        return "\n".join(lines)
+    except PermissionError as e:
+        return f"Auth error: {e}"
+    except Exception as e:
+        return f"Error getting flavors: {e}"
+
+
+@mcp.tool()
 async def create_build(
-    packages: list[str],
     platform: str,
+    packages: list[str],
     branch: str | None = None,
     from_tag: bool = False,
     from_srpm: bool = False,
@@ -393,9 +415,9 @@ async def create_build(
     automatically applies EPEL-specific flavors and defaults arch to x86_64_v2.
 
     Args:
+        platform: Target platform. Use get_platforms to see available options.
         packages: List of package names (for git/branch) or SRPM URLs (for from_srpm).
                   For from_tag: use "pkg_name tag_name" format or just "tag_name".
-        platform: Target platform. Use get_platforms to see available options.
         branch: Git branch to build from (e.g. "a8", "c9s").
         from_tag: Build from git tags instead of branch.
         from_srpm: Build from source RPM URLs.

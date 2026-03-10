@@ -43,8 +43,8 @@ LOG_LINES_PER_CHUNK = 3000
 EPEL_URL_PATTERN = "dl.fedoraproject.org/pub/epel"
 
 EPEL_PLATFORM_FLAVORS: dict[str, list[str]] = {
-    "almalinux-10": ["EPEL-10", "EPEL-10_altarch"],
-    "almalinux-kitten-10": ["EPEL-10", "EPEL-Kitten_altarch"],
+    "AlmaLinux-10": ["EPEL-10", "EPEL-10_altarch"],
+    "AlmaLinux-Kitten-10": ["EPEL-10", "EPEL-Kitten-10_altarch"],
 }
 
 EPEL_DEFAULT_ARCH = ["x86_64_v2"]

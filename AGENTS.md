@@ -35,7 +35,20 @@ tests/
 - Python 3.10+. Always use `from __future__ import annotations` at the top of each module.
 - Type hints on all public functions and method signatures.
 - Follow the existing file separation: constants and config in `constants.py`, all HTTP and file I/O in `client.py`, MCP tool definitions and formatting in `server.py`.
+- No code duplication. Every HTTP call or piece of logic must live in exactly one place. `client.py` owns all HTTP calls; `server.py` MCP tools call client methods and format output. Follow the `get_platforms` / `get_flavors` pattern: client method fetches data, server tool formats it, other client methods reuse the same client method internally.
 - No hardcoded secrets or tokens anywhere in the code. Tokens are read from the `ALBS_JWT_TOKEN` env var or `~/.albs/credentials` file at runtime.
+
+## Fail-fast, no silent errors
+
+- Never silently skip invalid input. If a user passes an unknown flavor name, platform, arch, or any identifier that doesn't match what the API returns — raise an error immediately with the list of valid options. No `if x in dict` filtering that hides mistakes.
+- Never hardcode ALBS entity names (flavors, platforms, etc.) without verifying them against the live API. Names change — always validate dynamically.
+- When values in `constants.py` are used as defaults (e.g. `EPEL_PLATFORM_FLAVORS`), they must match real ALBS data. After adding or changing default values, verify them against the API (e.g. `get_flavors`, `get_platforms`).
+
+## MCP server management
+
+- The MCP server config lives in `~/.cursor/mcp.json`. See `README.md` for the config snippet.
+- After changing any source code in `src/albs_mcp/`, the package must be reinstalled and Cursor must be reloaded for changes to take effect.
+- Platform names in ALBS are case-sensitive (e.g. `AlmaLinux-Kitten-10`, not `almalinux-kitten-10`). Always use `get_platforms` to verify exact names.
 
 ## Security
 

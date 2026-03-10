@@ -36,3 +36,5 @@ Thumbs.db
 # Env files
 .env
 .env.*
+
+uv.lock

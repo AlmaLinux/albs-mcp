@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -58,10 +60,22 @@ If you need to show available platforms, call get_platforms().
 _client: ALBSClient | None = None
 
 
+def _load_token_from_credentials() -> str | None:
+    """Try reading JWT from ~/.albs/credentials (Python dict with 'token' key)."""
+    cred_path = Path.home() / ".albs" / "credentials"
+    if not cred_path.is_file():
+        return None
+    try:
+        data = ast.literal_eval(cred_path.read_text())
+        return data.get("token")
+    except Exception:
+        return None
+
+
 def _get_client() -> ALBSClient:
     global _client
     if _client is None:
-        token = os.environ.get("ALBS_JWT_TOKEN")
+        token = os.environ.get("ALBS_JWT_TOKEN") or _load_token_from_credentials()
         _client = ALBSClient(jwt_token=token)
     return _client
 

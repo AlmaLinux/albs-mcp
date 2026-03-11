@@ -1,0 +1,263 @@
+{
+  "skill_name": "albs-mcp-dev",
+  "evals": [
+    {
+      "id": 1,
+      "name": "investigate_basic",
+      "category": "build_failure",
+      "prompt": "Build 12345 failed. Can you investigate why?",
+      "expected_output": "Agent calls get_build_info(12345) first, then get_failed_tasks(12345), then download_log at least once, then read_log_tail at least once. Final response identifies root cause: missing dependency (libfoo-devel).",
+      "criteria": [
+        "The agent calls get_build_info with build_id=12345 as the first tool call",
+        "The agent calls get_failed_tasks with build_id=12345",
+        "The agent calls download_log at least once for build_id=12345",
+        "The agent calls read_log_tail at least once",
+        "The agent's final response identifies the root cause: missing dependency (libfoo-devel)"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "investigate_log_priority",
+      "category": "build_failure",
+      "prompt": "What happened with build 12345? It failed.",
+      "expected_output": "Agent calls get_build_info before log tools, get_failed_tasks before downloading, downloads/reads mock_root BEFORE mock_build, and does NOT call read_log_range before read_log_tail.",
+      "criteria": [
+        "The agent calls get_build_info before any log-reading tools",
+        "The agent calls get_failed_tasks before downloading logs",
+        "The agent downloads/reads mock_root BEFORE mock_build (mock_root is checked first for dependency issues)",
+        "The agent does NOT call read_log_range before read_log_tail"
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "investigate_reads_from_end",
+      "category": "build_failure",
+      "prompt": "Why did build 12345 fail?",
+      "expected_output": "Agent uses read_log_tail (not read_log_range) for initial log read. If read_log_range is called at all, it happens AFTER read_log_tail.",
+      "criteria": [
+        "The agent uses read_log_tail (not read_log_range) for the initial log read — errors are at the end",
+        "If read_log_range is called at all, it happens AFTER read_log_tail (for looking at earlier sections)"
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "investigate_large_log_safety",
+      "category": "build_failure",
+      "prompt": "Build 99000 failed. Help me debug it.",
+      "expected_output": "Agent uses read_log_tail to read the 187k-line mock_build log (never reads from line 1). Identifies compilation failure (make error / Bad exit status).",
+      "criteria": [
+        "The agent uses read_log_tail to read logs (not read_log_range from line 1)",
+        "The agent does NOT attempt to read the entire 187k-line mock_build log from the beginning",
+        "The agent identifies the build error: compilation failure (make error / Bad exit status)"
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "sign_shows_info_first",
+      "category": "signing",
+      "prompt": "Please sign build 67890.",
+      "expected_output": "Agent calls get_build_info(67890) BEFORE sign_build, calls get_sign_keys, presents build summary (platform, arches, packages), and asks user to confirm sign key BEFORE calling sign_build.",
+      "criteria": [
+        "The agent calls get_build_info with build_id=67890 BEFORE calling sign_build",
+        "The agent calls get_sign_keys to show available keys",
+        "The agent presents a summary of the build to the user (platform, architectures, packages)",
+        "The agent asks the user to confirm the sign key BEFORE calling sign_build (does NOT call sign_build without asking)"
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "sign_shows_keys",
+      "category": "signing",
+      "prompt": "I need to sign build 67890",
+      "expected_output": "Agent calls get_sign_keys, presents available keys with IDs and names, does NOT call sign_build without asking which key to use.",
+      "criteria": [
+        "The agent calls get_sign_keys",
+        "The agent presents the available sign keys to the user (showing key IDs and names)",
+        "The agent does NOT call sign_build without first asking the user which key to use"
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "sign_detects_epel",
+      "category": "signing",
+      "prompt": "Sign build 77000 please",
+      "expected_output": "Agent calls get_build_info(77000) and get_sign_keys. Notices EPEL flavors (EPEL-10, EPEL-10_altarch) and x86_64_v2-only arch, tells user this is EPEL-altarch build, suggests EPEL signing key (id=9), asks confirmation.",
+      "criteria": [
+        "The agent calls get_build_info with build_id=77000",
+        "The agent calls get_sign_keys",
+        "The agent notices EPEL flavors (EPEL-10, EPEL-10_altarch) and x86_64_v2-only architecture, and tells the user this is an EPEL-altarch build",
+        "The agent suggests or mentions the EPEL signing key (id=9 or name=EPEL-10)",
+        "The agent asks the user to confirm the sign key before calling sign_build"
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "epel_asks_about_dist",
+      "category": "epel_build",
+      "prompt": "Build this EPEL package for AlmaLinux-10: https://dl.fedoraproject.org/pub/epel/10/Everything/source/tree/Packages/h/htop-3.3.0-2.el10.src.rpm",
+      "expected_output": "Agent asks user about add_epel_dist BEFORE calling create_build. Mentions EPEL flavors (EPEL-10, EPEL-10_altarch) for AlmaLinux-10.",
+      "criteria": [
+        "The agent asks the user whether they want to enable add_epel_dist (or mentions it proactively) BEFORE calling create_build",
+        "The agent mentions EPEL flavors: it should add flavors=[\"EPEL-10\", \"EPEL-10_altarch\"] for AlmaLinux-10"
+      ],
+      "files": []
+    },
+    {
+      "id": 9,
+      "name": "epel_correct_flavors_al10",
+      "category": "epel_build",
+      "prompt": "Build https://dl.fedoraproject.org/pub/epel/10/Everything/source/tree/Packages/h/htop-3.3.0-2.el10.src.rpm for AlmaLinux-10 with add-epel-dist enabled.",
+      "expected_output": "Agent calls create_build with flavors=[\"EPEL-10\", \"EPEL-10_altarch\"], from_srpm=true, add_epel_dist=true.",
+      "criteria": [
+        "The agent calls create_build",
+        "create_build is called with flavors containing \"EPEL-10\" and \"EPEL-10_altarch\"",
+        "create_build is called with from_srpm=true",
+        "create_build is called with add_epel_dist=true"
+      ],
+      "files": []
+    },
+    {
+      "id": 10,
+      "name": "epel_correct_flavors_kitten",
+      "category": "epel_build",
+      "prompt": "Build https://dl.fedoraproject.org/pub/epel/10/Everything/source/tree/Packages/h/htop-3.3.0-2.el10.src.rpm for AlmaLinux-Kitten-10 with add-epel-dist please.",
+      "expected_output": "Agent calls create_build with flavors containing \"EPEL-10\" and \"EPEL-Kitten_altarch\" (NOT \"EPEL-10_altarch\"), add_epel_dist=true.",
+      "criteria": [
+        "The agent calls create_build",
+        "create_build is called with flavors containing \"EPEL-10\" and \"EPEL-Kitten_altarch\" (NOT \"EPEL-10_altarch\" — that is for AlmaLinux-10)",
+        "create_build is called with add_epel_dist=true"
+      ],
+      "files": []
+    },
+    {
+      "id": 11,
+      "name": "epel_default_arch",
+      "category": "epel_build",
+      "prompt": "Build https://dl.fedoraproject.org/pub/epel/10/Everything/source/tree/Packages/h/htop-3.3.0-2.el10.src.rpm on AlmaLinux-10 with EPEL flavors and add-epel-dist. I didn't specify architectures.",
+      "expected_output": "Agent calls create_build with arch_list=[\"x86_64_v2\"] (EPEL default). Does NOT ask user which architectures to use.",
+      "criteria": [
+        "The agent calls create_build",
+        "create_build is called with arch_list=[\"x86_64_v2\"] (the EPEL default, since the user did not specify arches)",
+        "The agent does NOT ask the user which architectures to use"
+      ],
+      "files": []
+    },
+    {
+      "id": 12,
+      "name": "route_platforms",
+      "category": "tool_selection",
+      "prompt": "What platforms are available in ALBS?",
+      "expected_output": "First (or only) tool call is get_platforms. Does NOT call get_build_info or search_builds.",
+      "criteria": [
+        "The first (or only) tool call is get_platforms",
+        "The agent does NOT call get_build_info or search_builds"
+      ],
+      "files": []
+    },
+    {
+      "id": 13,
+      "name": "route_search",
+      "category": "tool_selection",
+      "prompt": "Find recent builds for the bash package",
+      "expected_output": "First tool call is search_builds with project=\"bash\". Does NOT call get_build_info without a build ID.",
+      "criteria": [
+        "The first tool call is search_builds with project=\"bash\" (or similar)",
+        "The agent does NOT call get_build_info without a build ID"
+      ],
+      "files": []
+    },
+    {
+      "id": 14,
+      "name": "route_build_info",
+      "category": "tool_selection",
+      "prompt": "Show me the details of build 50100",
+      "expected_output": "First tool call is get_build_info with build_id=50100. Does NOT call search_builds or get_failed_tasks first.",
+      "criteria": [
+        "The first tool call is get_build_info with build_id=50100",
+        "The agent does NOT call search_builds or get_failed_tasks first"
+      ],
+      "files": []
+    },
+    {
+      "id": 15,
+      "name": "route_list_logs",
+      "category": "tool_selection",
+      "prompt": "What log files are available for build 12345?",
+      "expected_output": "Agent calls list_build_logs with build_id=12345. Response lists available log files.",
+      "criteria": [
+        "The agent calls list_build_logs with build_id=12345 (may also call get_build_info, but list_build_logs must be called)",
+        "The agent's response lists the available log files"
+      ],
+      "files": []
+    },
+    {
+      "id": 16,
+      "name": "route_flavors",
+      "category": "tool_selection",
+      "prompt": "What platform flavors are available?",
+      "expected_output": "First tool call is get_flavors. Response lists flavor names.",
+      "criteria": [
+        "The first tool call is get_flavors",
+        "The agent's response lists the flavor names"
+      ],
+      "files": []
+    },
+    {
+      "id": 17,
+      "name": "delete_blocked",
+      "category": "error_handling",
+      "prompt": "Delete build 12345",
+      "expected_output": "Agent either calls delete_build and relays 'blocked' message, or explains upfront that deletion is blocked. Does NOT pretend the build was deleted.",
+      "criteria": [
+        "The agent either calls delete_build (and relays the 'blocked' message) OR explains upfront that deletion is blocked",
+        "The agent does NOT pretend the build was deleted"
+      ],
+      "files": []
+    },
+    {
+      "id": 18,
+      "name": "create_asks_details",
+      "category": "error_handling",
+      "prompt": "Build a package for me please",
+      "expected_output": "Agent asks for package name, platform, and build method (branch/tag/SRPM). Does NOT call create_build or invent parameters.",
+      "criteria": [
+        "The agent asks the user for at least: package name, platform, and build method (branch/tag/SRPM) — these are required",
+        "The agent does NOT call create_build without knowing the package name",
+        "The agent does NOT invent a package name or platform"
+      ],
+      "files": []
+    },
+    {
+      "id": 19,
+      "name": "auth_error_graceful",
+      "category": "error_handling",
+      "prompt": "Show me the available sign keys",
+      "expected_output": "Agent calls get_sign_keys, gets auth error, reports it clearly mentioning JWT token / authentication. No crash or garbled output.",
+      "criteria": [
+        "The agent calls get_sign_keys",
+        "The agent reports the auth error clearly to the user (mentions JWT token or authentication)",
+        "The agent does NOT crash or produce garbled output"
+      ],
+      "files": []
+    },
+    {
+      "id": 20,
+      "name": "build_not_found",
+      "category": "error_handling",
+      "prompt": "What happened with build 999999?",
+      "expected_output": "Agent calls get_build_info(999999), gets 404, tells user the build was not found. Does not fabricate information.",
+      "criteria": [
+        "The agent calls get_build_info with build_id=999999",
+        "The agent tells the user the build was not found (does not fabricate information)"
+      ],
+      "files": []
+    }
+  ]
+}

@@ -30,6 +30,14 @@ tests/
 - Every new tool, parameter, or behavioral change must have corresponding unit tests.
 - Async tests use `pytest-asyncio` with `asyncio_mode = "auto"` (configured in `pyproject.toml`). No need to decorate with `@pytest.mark.asyncio` explicitly.
 
+## Evals
+
+- Eval definitions live in `.cursor/skills/albs-mcp-dev/evals/evals.json`. They verify that an AI agent following the server instructions and tool descriptions would behave correctly in real workflows.
+- **Run evals after every code change** — not just instruction or tool changes. Any change to `client.py`, `server.py`, `constants.py`, or tests can affect agent behavior. Evals must always pass.
+- **Every new tool must have eval cases.** At minimum: one `tool_selection` case (the agent routes to this tool given a natural-language prompt) and one workflow case if the tool is part of a multi-step workflow (e.g. investigation, signing, EPEL builds).
+- A tool without evals is not done. Do not consider a new tool complete until its eval cases are added and all evals pass.
+- To run evals: read `evals/evals.json`, read the current `server.py` instructions and tool signatures, verify each criterion against the code, report pass/fail.
+
 ## Code style
 
 - Python 3.10+. Always use `from __future__ import annotations` at the top of each module.

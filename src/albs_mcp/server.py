@@ -221,7 +221,7 @@ async def create_build(
     secureboot: bool = False,
     nosecureboot: bool = False,
     excludes: str | None = None,
-    definitions: str | None = None,
+    definitions: dict[str, str] | None = None,
     linked_builds: list[int] | None = None,
     flavors: list[str] | None = None,
     with_opts: list[str] | None = None,
@@ -265,7 +265,7 @@ async def create_build(
         secureboot: Enable SecureBoot signing.
         nosecureboot: Override secureboot requirement for SB packages.
         excludes: Space-separated packages to exclude from mock.
-        definitions: JSON string of mock definitions, e.g. '{"dist": ".el9"}'.
+        definitions: Dict of mock definitions, e.g. {"dist": ".el9"}.
         linked_builds: Build IDs to link.
         flavors: Additional flavor names.
         with_opts: Mock --with options.

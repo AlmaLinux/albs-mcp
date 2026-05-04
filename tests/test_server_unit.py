@@ -496,6 +496,38 @@ async def test_create_build_skip_tests_merges_definitions(mock_client):
     }
 
 
+@pytest.mark.asyncio
+async def test_create_build_definitions_dict(mock_client):
+    """MCP path: pass definitions as a dict (no JSON string juggling)."""
+    result = await create_build(
+        packages=["bash"],
+        platform="AlmaLinux-9",
+        branch="c9s",
+        definitions={"dist_name": "almalinux"},
+    )
+    assert "Build created successfully" in result
+    call_args = mock_client.create_build.call_args[1]
+    assert call_args["definitions"] == {"dist_name": "almalinux"}
+
+
+@pytest.mark.asyncio
+async def test_create_build_skip_tests_merges_definitions_dict(mock_client):
+    """skip_tests merging works when definitions is supplied as a dict."""
+    result = await create_build(
+        packages=["bash"],
+        platform="AlmaLinux-9",
+        branch="c9s",
+        skip_tests=True,
+        definitions={"dist": ".el9"},
+    )
+    assert "Build created successfully" in result
+    call_args = mock_client.create_build.call_args[1]
+    assert call_args["definitions"] == {
+        "dist": ".el9",
+        "__spec_check_template": "exit 0;",
+    }
+
+
 # ── create_build: EPEL params (AI passes explicitly) ─────────────────
 
 EPEL_SRPM = "https://dl.fedoraproject.org/pub/epel/10/Everything/source/tree/Packages/p/pkg-1.0-1.el10.src.rpm"

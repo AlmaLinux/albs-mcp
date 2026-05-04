@@ -283,7 +283,7 @@ async def create_build(
     secureboot: bool = False,
     nosecureboot: bool = False,
     excludes: str | None = None,
-    definitions: str | None = None,
+    definitions: dict[str, str] | str | None = None,
     linked_builds: list[int] | None = None,
     flavors: list[str] | None = None,
     with_opts: list[str] | None = None,
@@ -340,7 +340,12 @@ async def create_build(
             else:
                 pkg_dicts.append({url.strip(): "None"})
 
-    defs = json.loads(definitions) if definitions else None
+    if definitions is None:
+        defs = None
+    elif isinstance(definitions, str):
+        defs = json.loads(definitions)
+    else:
+        defs = dict(definitions)
     excl = excludes.split() if excludes else None
     notes: list[str] = []
 

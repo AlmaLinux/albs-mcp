@@ -505,6 +505,166 @@ async def test_create_build_linked_builds(client):
     assert call_data["linked_builds"] == [100, 200]
 
 
+# ── create_build: beta flavor ─────────────────────────────────────────
+
+SAMPLE_FLAVORS = [
+    {"id": 7, "name": "AlmaLinux-9-beta"},
+    {"id": 8, "name": "AlmaLinux-8-beta"},
+    {"id": 51, "name": "AlmaLinux-10-beta"},
+    {"id": 3, "name": "EPEL"},
+]
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_adds_flavor_id(client):
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-9"],
+        branch="c9s",
+        beta=True,
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platform_flavors"] == [7]
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_multi_platform(client):
+    client._platforms_cache = {
+        "AlmaLinux-8": ["x86_64"],
+        "AlmaLinux-9": ["x86_64"],
+    }
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-8", "AlmaLinux-9"],
+        branch="c9s",
+        beta=True,
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    # both beta flavor IDs included, in platform order
+    assert call_data["platform_flavors"] == [8, 7]
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_combined_with_additional_flavors(client):
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-9"],
+        branch="c9s",
+        beta=True,
+        additional_flavors=["EPEL"],
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platform_flavors"] == [7, 3]
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_dedupes_with_additional_flavors(client):
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-9"],
+        branch="c9s",
+        beta=True,
+        additional_flavors=["AlmaLinux-9-beta"],
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platform_flavors"] == [7]
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_kitten_not_supported(client):
+    """Kitten-10 has no beta flavor — beta=True must be rejected for it."""
+    client._platforms_cache = {"AlmaLinux-Kitten-10": ["x86_64", "riscv64"]}
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    with pytest.raises(ValueError, match="not supported for platform"):
+        await client.create_build(
+            packages=[{"bash": "None"}],
+            platforms=["AlmaLinux-Kitten-10"],
+            branch="kitten",
+            beta=True,
+        )
+    client._http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_unsupported_platform_raises(client):
+    """Platforms missing from BETA_PLATFORM_FLAVORS must raise BEFORE any HTTP call."""
+    client._platforms_cache = {"CentOS7": ["x86_64"]}
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_FLAVORS))
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    with pytest.raises(ValueError, match="not supported for platform"):
+        await client.create_build(
+            packages=[{"bash": "None"}],
+            platforms=["CentOS7"],
+            branch="main",
+            beta=True,
+        )
+    client._http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_build_beta_stale_constant_raises(client):
+    """If BETA_PLATFORM_FLAVORS lists a name that ALBS no longer has, raise loudly."""
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    # ALBS returns a flavor list missing AlmaLinux-9-beta → stale constant
+    flavors_without_target = [{"id": 99, "name": "AlmaLinux-10-beta"}]
+    client._http.get = AsyncMock(
+        return_value=_mock_response(flavors_without_target)
+    )
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    with pytest.raises(ValueError, match="stale"):
+        await client.create_build(
+            packages=[{"bash": "None"}],
+            platforms=["AlmaLinux-9"],
+            branch="c9s",
+            beta=True,
+        )
+    client._http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_build_no_beta_no_flavor_fetch(client):
+    """When beta=False and no additional_flavors, get_flavors must not be called."""
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    client._http.get = AsyncMock()  # would fail if called (no return_value mock)
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-9"],
+        branch="c9s",
+    )
+    client._http.get.assert_not_called()
+    call_data = client._http.post.call_args[1]["json"]
+    assert "platform_flavors" not in call_data
+
+
 # ── extract_el_version ────────────────────────────────────────────────
 
 def test_extract_el_version_from_tag():

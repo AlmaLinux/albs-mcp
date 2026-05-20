@@ -48,3 +48,18 @@ EPEL_PLATFORM_FLAVORS: dict[str, list[str]] = {
 }
 
 EPEL_DEFAULT_ARCH = ["x86_64_v2"]
+
+# ── Beta flavor map ───────────────────────────────────────────────────
+#
+# Per-platform beta flavor names. Not every platform has a beta flavor
+# (e.g. AlmaLinux-Kitten-10 and CentOS are intentionally absent), so the
+# mapping is explicit rather than a `<platform>-beta` pattern.
+#
+# Names MUST still be validated against the live ALBS API at use time:
+# see ALBSClient.create_build, which calls get_flavors() and raises
+# ValueError if any name here is no longer present on ALBS.
+BETA_PLATFORM_FLAVORS: dict[str, list[str]] = {
+    "AlmaLinux-8": ["AlmaLinux-8-beta"],
+    "AlmaLinux-9": ["AlmaLinux-9-beta"],
+    "AlmaLinux-10": ["AlmaLinux-10-beta"],
+}

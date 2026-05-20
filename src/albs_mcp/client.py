@@ -10,6 +10,7 @@ import httpx
 from .constants import (
     ALBS_API,
     ALBS_LOGS_BASE,
+    BETA_PLATFORM_FLAVORS,
     SECURE_BOOT_PACKAGES,
 )
 
@@ -236,8 +237,6 @@ class ALBSClient:
         }
         if linked_builds:
             data["linked_builds"] = linked_builds
-        if beta:
-            data["platform_flavors"] = []
         if excludes:
             data.setdefault("mock_options", {})["yum_exclude"] = excludes
         if definitions:
@@ -248,16 +247,48 @@ class ALBSClient:
             data.setdefault("mock_options", {})["without"] = without_opts
         if modules:
             data.setdefault("mock_options", {})["module_enable"] = modules
-        if additional_flavors:
+        if beta or additional_flavors:
             flavors = await self.get_flavors()
-            unknown = [f for f in additional_flavors if f not in flavors]
-            if unknown:
-                raise ValueError(
-                    f"Unknown flavor(s): {unknown}. "
-                    f"Available: {sorted(flavors)}"
-                )
-            flav_ids = [flavors[f] for f in additional_flavors]
-            data.setdefault("platform_flavors", []).extend(flav_ids)
+            flav_ids: list[int] = []
+            if beta:
+                unsupported = [
+                    p for p in platforms if p not in BETA_PLATFORM_FLAVORS
+                ]
+                if unsupported:
+                    raise ValueError(
+                        f"beta=True is not supported for platform(s) "
+                        f"{unsupported}. Platforms with a known beta flavor: "
+                        f"{sorted(BETA_PLATFORM_FLAVORS)}. "
+                        f"Pass additional_flavors=[...] explicitly if you need "
+                        f"a non-standard beta flavor."
+                    )
+                wanted: list[str] = []
+                for plat in platforms:
+                    wanted.extend(BETA_PLATFORM_FLAVORS[plat])
+                # Validate the predefined names against the live API —
+                # never trust constants without verifying (per AGENTS.md).
+                missing = [n for n in wanted if n not in flavors]
+                if missing:
+                    raise ValueError(
+                        f"Beta flavor(s) {missing} from BETA_PLATFORM_FLAVORS "
+                        f"are not present on ALBS. The constant is stale — "
+                        f"update src/albs_mcp/constants.py. "
+                        f"Available: {sorted(flavors)}"
+                    )
+                flav_ids.extend(flavors[n] for n in wanted)
+            if additional_flavors:
+                unknown = [f for f in additional_flavors if f not in flavors]
+                if unknown:
+                    raise ValueError(
+                        f"Unknown flavor(s): {unknown}. "
+                        f"Available: {sorted(flavors)}"
+                    )
+                flav_ids.extend(flavors[f] for f in additional_flavors)
+            # de-duplicate while preserving order
+            seen: set[int] = set()
+            deduped = [i for i in flav_ids if not (i in seen or seen.add(i))]
+            if deduped:
+                data.setdefault("platform_flavors", []).extend(deduped)
 
         r = await self._http.post(
             f"{ALBS_API}/builds/", json=data, headers=self._auth_headers

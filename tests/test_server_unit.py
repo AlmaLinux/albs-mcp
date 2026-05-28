@@ -603,6 +603,37 @@ async def test_create_build_add_epel_dist_requires_tag_or_srpm(mock_client):
     mock_client.create_build.assert_not_called()
 
 
+# ── create_build: independent_tasks ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_build_independent_tasks(mock_client):
+    """independent_tasks=True is forwarded to the client and noted in output."""
+    result = await create_build(
+        packages=["bash"],
+        platform="AlmaLinux-9",
+        branch="c9s",
+        independent_tasks=True,
+    )
+    assert "Build created successfully" in result
+    assert "independent_tasks" in result
+    call_args = mock_client.create_build.call_args[1]
+    assert call_args["independent_tasks"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_build_independent_tasks_default(mock_client):
+    """When omitted, independent_tasks defaults to False and is not advertised."""
+    result = await create_build(
+        packages=["bash"],
+        platform="AlmaLinux-9",
+        branch="c9s",
+    )
+    assert "Build created successfully" in result
+    assert "independent_tasks" not in result
+    call_args = mock_client.create_build.call_args[1]
+    assert call_args["independent_tasks"] is False
+
+
 # ── sign_build ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

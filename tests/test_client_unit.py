@@ -885,6 +885,45 @@ async def test_create_build_multiple_platforms_bad_arch(client):
         )
 
 
+# ── create_build: independent_tasks ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_build_independent_tasks_default_false(client):
+    """By default, independent_tasks=False is sent per platform entry."""
+    client._platforms_cache = {"AlmaLinux-9": ["x86_64"]}
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-9"],
+        branch="c9s",
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platforms"][0]["independent_tasks"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_build_independent_tasks_true(client):
+    """independent_tasks=True is propagated to every platform entry."""
+    client._platforms_cache = {
+        "AlmaLinux-8": ["x86_64"],
+        "AlmaLinux-9": ["x86_64"],
+    }
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-8", "AlmaLinux-9"],
+        branch="c9s",
+        independent_tasks=True,
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    for plat in call_data["platforms"]:
+        assert plat["independent_tasks"] is True
+
+
 # ── sign_build ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

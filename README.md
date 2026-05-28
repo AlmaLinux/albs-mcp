@@ -141,6 +141,10 @@ albs create-build AlmaLinux-10 \
     --git-url https://github.com/ykohut/leapp-data.git \
     --branch devel-ng-0.23.0
 
+# Independent tasks (disable the default sequential per-platform task chain,
+# so packages build in parallel within each platform)
+albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
+
 # Sign a build (requires JWT)
 albs sign-keys
 albs sign-build 52679 --key-id 4

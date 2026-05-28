@@ -111,6 +111,7 @@ def _cmd_create_build(args: argparse.Namespace) -> None:
         with_opts=getattr(args, "with") or None,
         without_opts=args.without or None,
         modules=args.module or None,
+        independent_tasks=args.independent_tasks,
     ))
 
 
@@ -265,6 +266,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--module", action="append", default=[],
         help='Module to enable, e.g. "nodejs:18" (repeat).',
+    )
+    p.add_argument(
+        "--independent-tasks", dest="independent_tasks", action="store_true",
+        help=(
+            "Disable the per-platform sequential task chain so packages build "
+            "independently / in parallel within each platform (default: chained)."
+        ),
     )
     p.set_defaults(func=_cmd_create_build)
 

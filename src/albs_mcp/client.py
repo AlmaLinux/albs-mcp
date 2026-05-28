@@ -136,13 +136,20 @@ class ALBSClient:
         e = min(total, end_line)
         return "\n".join(all_lines[s:e]), total
 
+    # ── Authenticated (JWT required) ──────────────────────────────────
+
     async def get_flavors(self) -> dict[str, int]:
-        """Get {flavor_name: flavor_id} mapping from ALBS."""
-        r = await self._http.get(f"{ALBS_API}/platform_flavors/")
+        """Get {flavor_name: flavor_id} mapping from ALBS. Requires JWT.
+
+        ALBS moved /platform_flavors/ behind authentication, so the request
+        must include the Bearer token or the server responds with 403
+        {"detail": "Not authenticated"}.
+        """
+        r = await self._http.get(
+            f"{ALBS_API}/platform_flavors/", headers=self._auth_headers
+        )
         r.raise_for_status()
         return {f["name"]: f["id"] for f in r.json()}
-
-    # ── Authenticated (JWT required) ──────────────────────────────────
 
     async def get_sign_keys(self) -> list[dict[str, Any]]:
         """Get available sign keys. Requires JWT."""
@@ -171,6 +178,7 @@ class ALBSClient:
         without_opts: list[str] | None = None,
         modules: list[str] | None = None,
         add_epel_dist: bool = False,
+        independent_tasks: bool = False,
     ) -> dict[str, Any]:
         if not from_tag and not branch and not from_srpm:
             raise ValueError("At least one of branch, from_tag, or from_srpm must be set")
@@ -196,6 +204,7 @@ class ALBSClient:
                 "name": plat,
                 "arch_list": arches,
                 "parallel_mode_enabled": True,
+                "independent_tasks": independent_tasks,
             })
 
         if not nosecureboot:

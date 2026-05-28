@@ -351,6 +351,31 @@ def test_create_build_no_add_platform():
     assert call_kw["platforms"] is None
 
 
+def test_create_build_independent_tasks_flag():
+    """--independent-tasks sets independent_tasks=True on the command call."""
+    with patch("albs_mcp._commands.create_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Build created successfully!"
+        code, out = _invoke([
+            "create-build", "AlmaLinux-9", "bash",
+            "--branch", "c9s", "--independent-tasks",
+        ])
+    assert code == 0
+    call_kw = mock.call_args[1]
+    assert call_kw["independent_tasks"] is True
+
+
+def test_create_build_independent_tasks_default_false():
+    """Without --independent-tasks, the flag is False."""
+    with patch("albs_mcp._commands.create_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Build created successfully!"
+        code, out = _invoke([
+            "create-build", "AlmaLinux-9", "bash", "--branch", "c9s",
+        ])
+    assert code == 0
+    call_kw = mock.call_args[1]
+    assert call_kw["independent_tasks"] is False
+
+
 # ── sign-build ────────────────────────────────────────────────────────
 
 

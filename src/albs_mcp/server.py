@@ -45,6 +45,9 @@ parameter instead of packages. Pass the full .git URL \
 (e.g. "https://github.com/user/repo.git"). The branch parameter sets the git ref. \
 git_urls can be combined with packages in the same build. \
 git_urls cannot be used with from_srpm.
+7. Use independent_tasks=True when the user wants packages in the build to start \
+in parallel within each platform instead of the default sequential chain. \
+The flag is applied to every platform entry in the payload.
 
 ## Building EPEL packages (SRPMs from dl.fedoraproject.org/pub/epel/)
 When a user wants to build packages from EPEL SRPMs, you MUST handle the following \
@@ -227,6 +230,7 @@ async def create_build(
     with_opts: list[str] | None = None,
     without_opts: list[str] | None = None,
     modules: list[str] | None = None,
+    independent_tasks: bool = False,
 ) -> str:
     """Create a new build on ALBS. Requires JWT token.
 
@@ -271,6 +275,12 @@ async def create_build(
         with_opts: Mock --with options.
         without_opts: Mock --without options.
         modules: Modules to enable, e.g. ["nodejs:18"].
+        independent_tasks: When True, disables the per-platform sequential
+                           task chain so packages build independently / in
+                           parallel within each platform (the default ALBS
+                           behavior chains task N's start on task N-1's
+                           completion). Applied to every platform entry in
+                           the payload. Default: False.
     """
     return await cmd.create_build(
         platform=platform,
@@ -294,6 +304,7 @@ async def create_build(
         with_opts=with_opts,
         without_opts=without_opts,
         modules=modules,
+        independent_tasks=independent_tasks,
     )
 
 

@@ -63,6 +63,10 @@ albs create-build AlmaLinux-9 bash glibc openssl --branch c9s
 
 # Skip tests
 albs create-build AlmaLinux-9 bash --branch c9s --skip-tests
+
+# Independent tasks (packages build in parallel within the platform,
+# instead of the default sequential per-platform chain)
+albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
 ```
 
 ## Building EPEL packages

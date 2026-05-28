@@ -289,6 +289,7 @@ async def create_build(
     with_opts: list[str] | None = None,
     without_opts: list[str] | None = None,
     modules: list[str] | None = None,
+    independent_tasks: bool = False,
 ) -> str:
     all_platforms: list[str] = []
     if platform:
@@ -366,6 +367,12 @@ async def create_build(
             "(.elN.alma_altarch) from package name"
         )
 
+    if independent_tasks:
+        notes.append(
+            "independent_tasks: per-platform task chain disabled "
+            "(packages build in parallel, not sequentially)"
+        )
+
     client = _get_client()
     try:
         result = await client.create_build(
@@ -386,6 +393,7 @@ async def create_build(
             without_opts=without_opts,
             modules=modules,
             add_epel_dist=add_epel_dist,
+            independent_tasks=independent_tasks,
         )
         lines = [
             "Build created successfully!",

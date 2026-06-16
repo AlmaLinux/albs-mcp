@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 
+import httpx
+
 from .client import ALBSClient
 from .constants import (
     BUILD_TASK_STATUS,
@@ -47,6 +49,64 @@ def reset_client() -> None:
     _client = None
 
 
+def _api_error(action: str, e: Exception) -> str:
+    """Format an API/IO error for the MCP client without leaking internals.
+
+    Never returns stack traces or absolute filesystem paths. Strings start
+    with "Error" / "Auth error" so the CLI maps them to a non-zero exit code.
+    The 404 message reuses `action` (e.g. "reading log mock.log") so a missing
+    log file is not misreported as a missing build.
+    """
+    if isinstance(e, PermissionError):
+        return f"Auth error: {e}"
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        if code == 404:
+            return f"Error: {action}: not found (HTTP 404)."
+        if code in (401, 403):
+            return (
+                f"Auth error: not authorized for {action} (HTTP {code}). "
+                "A JWT token may be required."
+            )
+        return f"Error: ALBS API returned HTTP {code} during {action}."
+    if isinstance(e, httpx.RequestError):
+        return f"Error: could not reach ALBS during {action} (network error)."
+    return f"Error during {action}: {e}"
+
+
+def _count_lines(path: Path) -> int:
+    """Count lines in a file without loading it into memory (matches splitlines).
+
+    Counts newline bytes plus a final line lacking a trailing newline.
+    """
+    total = 0
+    last = b"\n"
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            total += chunk.count(b"\n")
+            last = chunk[-1:]
+    if last != b"\n":
+        total += 1
+    return total
+
+
+async def _read_log(client: ALBSClient, build_id: int, filename: str, reader):
+    """Run a sync log reader, auto-downloading the log first if it's missing.
+
+    Lets callers read a log without a separate download_log step. A
+    path-traversal ValueError from the reader propagates (never triggers a
+    download).
+    """
+    try:
+        return reader()
+    except FileNotFoundError:
+        await client.download_log(build_id, filename)
+        return reader()
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Read-only commands
 # ═══════════════════════════════════════════════════════════════════════
@@ -54,7 +114,10 @@ def reset_client() -> None:
 
 async def get_platforms() -> str:
     client = _get_client()
-    platforms = await client.get_platforms()
+    try:
+        platforms = await client.get_platforms()
+    except Exception as e:
+        return _api_error("getting platforms", e)
     lines = [f"Platforms ({len(platforms)}):", ""]
     for p in platforms:
         arches = ", ".join(p.get("arch_list", []))
@@ -64,7 +127,10 @@ async def get_platforms() -> str:
 
 async def get_build_info(build_id: int) -> str:
     client = _get_client()
-    build = await client.get_build(build_id)
+    try:
+        build = await client.get_build(build_id)
+    except Exception as e:
+        return _api_error(f"getting build #{build_id}", e)
 
     platforms = {
         t["platform"]["name"]
@@ -110,7 +176,10 @@ async def get_build_info(build_id: int) -> str:
 
 async def get_failed_tasks(build_id: int) -> str:
     client = _get_client()
-    build = await client.get_build(build_id)
+    try:
+        build = await client.get_build(build_id)
+    except Exception as e:
+        return _api_error(f"getting build #{build_id}", e)
 
     failed = [t for t in build["tasks"] if t["status"] == 3]
     if not failed:
@@ -133,16 +202,19 @@ async def get_failed_tasks(build_id: int) -> str:
 
     lines.append(
         "★ = key logs for debugging. "
-        "Use download_log + read_log_tail to investigate."
+        "Use read_log_tail to read them (it downloads automatically)."
     )
     return "\n".join(lines)
 
 
 async def download_log(build_id: int, filename: str) -> str:
     client = _get_client()
-    path = await client.download_log(build_id, filename)
+    try:
+        path = await client.download_log(build_id, filename)
+    except Exception as e:
+        return _api_error(f"downloading log {filename}", e)
     size = path.stat().st_size
-    total_lines = len(path.read_text(errors="replace").splitlines())
+    total_lines = _count_lines(path)
     return (
         f"Downloaded: {path}\n"
         f"Size: {size:,} bytes\n"
@@ -157,7 +229,13 @@ async def read_log_tail(
     lines: int = LOG_LINES_PER_CHUNK,
 ) -> str:
     client = _get_client()
-    content, total, from_line = client.read_log_tail(build_id, filename, lines)
+    try:
+        content, total, from_line = await _read_log(
+            client, build_id, filename,
+            lambda: client.read_log_tail(build_id, filename, lines),
+        )
+    except Exception as e:
+        return _api_error(f"reading log {filename}", e)
     header = (
         f"=== {filename} | lines {from_line}-{total} of {total} ===\n"
     )
@@ -171,7 +249,13 @@ async def read_log_range(
     end_line: int,
 ) -> str:
     client = _get_client()
-    content, total = client.read_log_range(build_id, filename, start_line, end_line)
+    try:
+        content, total = await _read_log(
+            client, build_id, filename,
+            lambda: client.read_log_range(build_id, filename, start_line, end_line),
+        )
+    except Exception as e:
+        return _api_error(f"reading log {filename}", e)
     header = (
         f"=== {filename} | lines {start_line}-{end_line} of {total} ===\n"
     )
@@ -180,7 +264,10 @@ async def read_log_range(
 
 async def list_build_logs(build_id: int) -> str:
     client = _get_client()
-    logs = await client.list_build_logs(build_id)
+    try:
+        logs = await client.list_build_logs(build_id)
+    except Exception as e:
+        return _api_error(f"listing logs for build #{build_id}", e)
     if not logs:
         return f"No logs found for build #{build_id}."
     lines = [f"Build #{build_id}: {len(logs)} log file(s)", ""]
@@ -198,7 +285,10 @@ async def search_builds(
     is_running: bool | None = None,
 ) -> str:
     client = _get_client()
-    data = await client.search_builds(page, project, is_running)
+    try:
+        data = await client.search_builds(page, project, is_running)
+    except Exception as e:
+        return _api_error("searching builds", e)
 
     builds = data if isinstance(data, list) else data.get("builds", [])
     lines = [f"Builds (page {page}): {len(builds)} result(s)", ""]
@@ -219,6 +309,31 @@ async def search_builds(
             f"tasks={task_count} [{status_str}]  {pkg_str}"
         )
 
+    return "\n".join(lines)
+
+
+async def get_sign_task_status(build_id: int) -> str:
+    client = _get_client()
+    try:
+        tasks = await client.get_sign_tasks(build_id)
+    except Exception as e:
+        return _api_error(f"getting sign tasks for build #{build_id}", e)
+
+    if not tasks:
+        return f"Build #{build_id}: no sign tasks."
+
+    lines = [f"Build #{build_id}: {len(tasks)} sign task(s)", ""]
+    for t in tasks:
+        status = SIGN_TASK_STATUS.get(t.get("status"), f"unknown({t.get('status')})")
+        line = f"  sign_task_id={t.get('id')}  [{status}]"
+        key_id = t.get("sign_key_id")
+        if key_id is None:
+            key_id = (t.get("sign_key") or {}).get("id")
+        if key_id is not None:
+            line += f"  sign_key_id={key_id}"
+        if t.get("error_message"):
+            line += f"  error={t['error_message']}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -245,10 +360,8 @@ async def get_sign_keys() -> str:
             if k.get("description"):
                 lines.append(f"    {k['description']}")
         return "\n".join(lines)
-    except PermissionError as e:
-        return f"Auth error: {e}"
     except Exception as e:
-        return f"Error getting sign keys: {e}"
+        return _api_error("getting sign keys", e)
 
 
 async def get_flavors() -> str:
@@ -261,10 +374,8 @@ async def get_flavors() -> str:
         for name, fid in sorted(flavors.items(), key=lambda x: x[0].lower()):
             lines.append(f"  id={fid:3d}  {name}")
         return "\n".join(lines)
-    except PermissionError as e:
-        return f"Auth error: {e}"
     except Exception as e:
-        return f"Error getting flavors: {e}"
+        return _api_error("getting flavors", e)
 
 
 async def create_build(
@@ -407,10 +518,8 @@ async def create_build(
             for note in notes:
                 lines.append(f"  • {note}")
         return "\n".join(lines)
-    except PermissionError as e:
-        return f"Auth error: {e}"
     except Exception as e:
-        return f"Error creating build: {e}"
+        return _api_error("creating build", e)
 
 
 async def sign_build(build_id: int, sign_key_id: int = 4) -> str:
@@ -422,10 +531,8 @@ async def sign_build(build_id: int, sign_key_id: int = 4) -> str:
             f"Sign task ID: {result['id']}\n"
             f"Status: {SIGN_TASK_STATUS.get(result['status'], 'unknown')}"
         )
-    except PermissionError as e:
-        return f"Auth error: {e}"
     except Exception as e:
-        return f"Error signing build: {e}"
+        return _api_error("signing build", e)
 
 
 async def delete_build(build_id: int) -> str:

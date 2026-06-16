@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -88,9 +89,23 @@ class ALBSClient:
         return f"{ALBS_LOGS_BASE}/build-{build_id}-build_log"
 
     def _log_path(self, build_id: int, filename: str) -> Path:
-        build_dir = self._log_dir / str(build_id)
+        # The filename must be a plain log basename. Reject anything with a
+        # path separator or percent-encoding *before* it is used: the same
+        # name is interpolated into the download URL, and an encoded separator
+        # (e.g. "%2f..%2f") could traverse on the remote host even though the
+        # local write below is sandboxed. This whitelist blocks "/", "\\",
+        # "%", spaces, and control/NUL bytes.
+        if not re.fullmatch(r"[A-Za-z0-9._+-]+", filename or ""):
+            raise ValueError(f"Invalid log filename: {filename!r}")
+        build_dir = (self._log_dir / str(build_id)).resolve()
         build_dir.mkdir(parents=True, exist_ok=True)
-        return build_dir / filename
+        # Defense in depth: the resolved destination must stay inside this
+        # build's log directory (also rejects "." and ".." which pass the
+        # whitelist above).
+        dest = (build_dir / filename).resolve()
+        if dest == build_dir or not dest.is_relative_to(build_dir):
+            raise ValueError(f"Invalid log filename: {filename!r}")
+        return dest
 
     async def list_build_logs(self, build_id: int) -> list[str]:
         """Parse the Pulp directory listing for a build's logs."""
@@ -100,41 +115,67 @@ class ALBSClient:
         return re.findall(r'href="([^"]+\.(?:log|cfg))"', r.text)
 
     async def download_log(self, build_id: int, filename: str) -> Path:
-        url = f"{self._log_base_url(build_id)}/{filename}"
         dest = self._log_path(build_id, filename)
-        async with self._http.stream("GET", url) as resp:
-            resp.raise_for_status()
-            with open(dest, "wb") as f:
-                async for chunk in resp.aiter_bytes(8192):
-                    f.write(chunk)
+        url = f"{self._log_base_url(build_id)}/{filename}"
+        # Download to a temp file and atomically rename, so an interrupted
+        # download never leaves a partial file at `dest` that later reads
+        # would silently treat as the complete log.
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            async with self._http.stream("GET", url) as resp:
+                resp.raise_for_status()
+                with open(tmp, "wb") as f:
+                    async for chunk in resp.aiter_bytes(8192):
+                        f.write(chunk)
+            tmp.replace(dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return dest
 
     def read_log_tail(self, build_id: int, filename: str, lines: int) -> tuple[str, int, int]:
-        """Read last `lines` lines. Returns (content, total_lines, from_line)."""
+        """Read last `lines` lines. Returns (content, total_lines, from_line).
+
+        Streams the file once, keeping only the last `lines` lines in memory.
+        mock_build logs can be 100k+ lines / hundreds of MB, so the whole file
+        is never materialized.
+        """
         path = self._log_path(build_id, filename)
         if not path.exists():
             raise FileNotFoundError(
                 f"Log not downloaded yet. Use download_log first: {filename}"
             )
-        all_lines = path.read_text(errors="replace").splitlines()
-        total = len(all_lines)
+        total = 0
+        tail: deque[str] = deque(maxlen=lines if lines > 0 else 0)
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                total += 1
+                tail.append(line.rstrip("\n"))
         start = max(0, total - lines)
-        return "\n".join(all_lines[start:]), total, start + 1
+        return "\n".join(tail), total, start + 1
 
     def read_log_range(
         self, build_id: int, filename: str, start_line: int, end_line: int
     ) -> tuple[str, int]:
-        """Read a specific range. Returns (content, total_lines)."""
+        """Read a specific range. Returns (content, total_lines).
+
+        Streams the file once, collecting only the requested line window
+        instead of materializing the whole file.
+        """
         path = self._log_path(build_id, filename)
         if not path.exists():
             raise FileNotFoundError(
                 f"Log not downloaded yet. Use download_log first: {filename}"
             )
-        all_lines = path.read_text(errors="replace").splitlines()
-        total = len(all_lines)
         s = max(0, start_line - 1)
-        e = min(total, end_line)
-        return "\n".join(all_lines[s:e]), total
+        collected: list[str] = []
+        total = 0
+        with open(path, "r", errors="replace") as f:
+            for i, line in enumerate(f):
+                total += 1
+                if s <= i < end_line:
+                    collected.append(line.rstrip("\n"))
+        return "\n".join(collected), total
 
     # ── Authenticated (JWT required) ──────────────────────────────────
 

@@ -1,6 +1,7 @@
 """Unit tests for the CLI interface with mocked command functions."""
 from __future__ import annotations
 
+import os
 import sys
 from io import StringIO
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,21 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from albs_mcp.cli import build_parser, _init
+
+
+@pytest.fixture(autouse=True)
+def _restore_env():
+    """_init writes ALBS_* straight into os.environ (outside monkeypatch);
+    snapshot and restore so CLI tests don't leak env vars into other test
+    files (e.g. the integration client picking up a bogus ALBS_LOG_DIR)."""
+    keys = ("ALBS_LOG_DIR", "ALBS_JWT_TOKEN")
+    saved = {k: os.environ.get(k) for k in keys}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def _invoke(args: list[str]) -> tuple[int, str]:
@@ -182,6 +198,18 @@ def test_sign_keys():
         code, out = _invoke(["sign-keys"])
     assert code == 0
     assert "AL9-key" in out
+
+
+# ── sign-status ───────────────────────────────────────────────────────
+
+
+def test_sign_status():
+    with patch("albs_mcp._commands.get_sign_task_status", new_callable=AsyncMock) as mock:
+        mock.return_value = "Build #50000: 1 sign task(s)\n  sign_task_id=1  [completed]"
+        code, out = _invoke(["sign-status", "50000"])
+    assert code == 0
+    assert "sign_task_id=1" in out
+    mock.assert_awaited_once_with(50000)
 
 
 # ── flavors ───────────────────────────────────────────────────────────

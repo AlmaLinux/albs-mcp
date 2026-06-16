@@ -21,7 +21,8 @@ Two ways to use:
 - **Get build details** — statuses of all tasks, packages, architectures, sign tasks.
 - **List and search builds** — browse recent builds, filter by package name or status.
 - **Get platforms** — dynamically fetched list of all platforms and their supported architectures.
-- **Download and read logs** — any log file from any build, with smart pagination (tail first, then range).
+- **Download and read logs** — any log file from any build, with smart pagination (tail first, then range). Reading auto-downloads the log if it isn't on disk yet.
+- **Check sign status** — see whether sign tasks for a build completed or failed.
 
 ### With a JWT token (authenticated)
 
@@ -120,7 +121,7 @@ albs platforms
 # Investigate a build
 albs build-info 52679
 albs failed-tasks 52679
-albs download-log 52679 "mock_build.395391.1772974729.log"
+# log-tail auto-downloads the log if needed (download-log is optional)
 albs log-tail 52679 "mock_build.395391.1772974729.log" -n 200
 
 # Search builds
@@ -149,6 +150,9 @@ albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-task
 albs sign-keys
 albs sign-build 52679 --key-id 4
 
+# Check whether signing finished
+albs sign-status 52679
+
 # Pass token via flag or env var
 albs --token "eyJ..." sign-keys
 ALBS_JWT_TOKEN="eyJ..." albs sign-keys
@@ -167,9 +171,10 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `get_failed_tasks` | Only failed tasks with their log files listed; key logs marked with ★ |
 | `list_build_logs` | All log/config files available for a build on the server |
 | `download_log` | Download a log file to local disk (`/tmp/albs-logs/<build_id>/`) |
-| `read_log_tail` | Read last N lines of a downloaded log (default 3000 — errors are at the end) |
-| `read_log_range` | Read a specific line range from a downloaded log |
+| `read_log_tail` | Read last N lines of a log (default 3000 — errors are at the end); auto-downloads if needed |
+| `read_log_range` | Read a specific line range from a log; auto-downloads if needed |
 | `search_builds` | Browse builds by page, filter by package name or running status |
+| `get_sign_task_status` | Status of a build's sign tasks (idle/in_progress/completed/failed) — use after `sign_build` |
 
 ### Authenticated (JWT required)
 
@@ -179,6 +184,22 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `create_build` | Create a build: packages or custom Git URLs + platform(s) + branch/tag/srpm, with all mock options |
 | `sign_build` | Create a sign task for a build with a chosen key |
 | `delete_build` | **Blocked** — disabled for safety |
+
+## Prompts
+
+MCP prompts are user-invoked workflow entry points. In clients like Claude Code they appear as slash commands (`/mcp__albs__<name>`); the user triggers them, not the agent.
+
+| Prompt | Arguments | Description |
+|---|---|---|
+| `investigate_build` | `build_id` | Seeds the build-failure investigation workflow for a build ID. Equivalent to asking "why did build N fail?", but as a one-step parameterized command. |
+
+Example (Claude Code):
+
+```
+/mcp__albs__investigate_build 52679
+```
+
+This expands into the investigation workflow (`get_build_info` → `get_failed_tasks` → download/read the key logs in order), parameterized by the build ID.
 
 ## Example: investigating a failed build
 

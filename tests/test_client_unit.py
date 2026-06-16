@@ -271,6 +271,57 @@ def test_read_log_tail_not_downloaded(client):
         client.read_log_tail(99999, "nonexistent.log", 10)
 
 
+# ── path traversal guard (_log_path) ──────────────────────────────────
+
+def test_log_path_allows_normal_filename(client, tmp_log_dir):
+    path = client._log_path(12345, "mock_build.300002.222.log")
+    assert path.name == "mock_build.300002.222.log"
+    assert path.parent.name == "12345"
+
+
+@pytest.mark.parametrize("evil", [
+    "../../etc/passwd",
+    "../12346/secret.log",
+    "/etc/passwd",
+    "subdir/../../escape.log",
+    "x%2f..%2f..%2fsecret",   # encoded separator — would traverse on the URL
+    "mock\x00.log",            # NUL byte
+    "mock build.log",          # space
+    "..",
+    ".",
+    "",
+])
+def test_log_path_rejects_traversal(client, evil):
+    with pytest.raises(ValueError, match="Invalid log filename"):
+        client._log_path(12345, evil)
+
+
+@pytest.mark.asyncio
+async def test_download_log_rejects_bad_filename_without_request(client):
+    """A filename failing the guard must raise before any HTTP request fires."""
+    called = False
+
+    def _fake_stream(method, url):
+        nonlocal called
+        called = True
+        raise AssertionError("HTTP request must not be made for a bad filename")
+
+    client._http.stream = _fake_stream
+    with pytest.raises(ValueError, match="Invalid log filename"):
+        await client.download_log(12345, "x%2f..%2f..%2fsecret")
+    assert called is False
+
+
+def test_log_path_error_hides_absolute_path(client, tmp_log_dir):
+    """The error echoes only the bad filename, not the resolved log directory."""
+    try:
+        client._log_path(12345, "../../etc/passwd")
+    except ValueError as e:
+        # The internal absolute log directory must not leak into the message.
+        assert str(tmp_log_dir.resolve()) not in str(e)
+        assert "../../etc/passwd" in str(e)
+
+
 # ── read_log_range ────────────────────────────────────────────────────
 
 def test_read_log_range(client, tmp_log_dir):

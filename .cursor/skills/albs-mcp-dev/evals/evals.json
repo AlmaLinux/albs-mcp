@@ -6,12 +6,11 @@
       "name": "investigate_basic",
       "category": "build_failure",
       "prompt": "Build 12345 failed. Can you investigate why?",
-      "expected_output": "Agent calls get_build_info(12345) first, then get_failed_tasks(12345), then download_log at least once, then read_log_tail at least once. Final response identifies root cause: missing dependency (libfoo-devel).",
+      "expected_output": "Agent calls get_build_info(12345) first, then get_failed_tasks(12345), then read_log_tail at least once (read_log_tail auto-downloads; an explicit download_log call is optional). Final response identifies root cause: missing dependency (libfoo-devel).",
       "criteria": [
         "The agent calls get_build_info with build_id=12345 as the first tool call",
         "The agent calls get_failed_tasks with build_id=12345",
-        "The agent calls download_log at least once for build_id=12345",
-        "The agent calls read_log_tail at least once",
+        "The agent calls read_log_tail at least once (it auto-downloads the log; a separate download_log call is allowed but not required)",
         "The agent's final response identifies the root cause: missing dependency (libfoo-devel)"
       ],
       "files": []
@@ -21,11 +20,11 @@
       "name": "investigate_log_priority",
       "category": "build_failure",
       "prompt": "What happened with build 12345? It failed.",
-      "expected_output": "Agent calls get_build_info before log tools, get_failed_tasks before downloading, downloads/reads mock_root BEFORE mock_build, and does NOT call read_log_range before read_log_tail.",
+      "expected_output": "Agent calls get_build_info before log tools, get_failed_tasks before reading logs, reads mock_root BEFORE mock_build, and does NOT call read_log_range before read_log_tail.",
       "criteria": [
         "The agent calls get_build_info before any log-reading tools",
-        "The agent calls get_failed_tasks before downloading logs",
-        "The agent downloads/reads mock_root BEFORE mock_build (mock_root is checked first for dependency issues)",
+        "The agent calls get_failed_tasks before reading logs",
+        "The agent reads mock_root BEFORE mock_build (mock_root is checked first for dependency issues)",
         "The agent does NOT call read_log_range before read_log_tail"
       ],
       "files": []
@@ -298,6 +297,47 @@
         "create_build includes both AlmaLinux-8 and AlmaLinux-9 via the platform and/or platforms parameters",
         "create_build is called with packages containing 'bash'",
         "create_build is called with branch='c9s'"
+      ],
+      "files": []
+    },
+    {
+      "id": 24,
+      "name": "prompt_investigate_build",
+      "category": "prompt",
+      "prompt": "Investigate why ALBS build 52679 failed.\n\nFollow the build-failure investigation workflow from the albs-mcp server instructions:\n1. Call get_build_info(52679) to see all tasks and statuses.\n2. Call get_failed_tasks(52679) to list failed tasks and their log files (★ marks the key logs).\n3. For each failed task, read the key logs in order — mock_root first (chroot/dependency issues), then mock_stderr, then mock_build — from the end with read_log_tail (it auto-downloads) before using read_log_range. Never read a large mock_build log from line 1.\n4. Report the root cause of the failure, citing the log evidence.",
+      "expected_output": "This is the text seeded by the investigate_build MCP prompt for build_id=52679. The agent follows it: get_build_info(52679) first, then get_failed_tasks(52679), then reads mock_root before mock_build using read_log_tail before read_log_range, and reports the root cause.",
+      "criteria": [
+        "The agent calls get_build_info with build_id=52679 as the first tool call",
+        "The agent calls get_failed_tasks with build_id=52679",
+        "The agent reads mock_root BEFORE mock_build",
+        "The agent uses read_log_tail before read_log_range",
+        "The agent's final response reports the root cause of the failure"
+      ],
+      "files": []
+    },
+    {
+      "id": 25,
+      "name": "route_sign_status",
+      "category": "tool_selection",
+      "prompt": "Did the signing finish for build 52679?",
+      "expected_output": "First (or only) tool call is get_sign_task_status with build_id=52679. Reports the sign task status. Does NOT create a new sign task.",
+      "criteria": [
+        "The agent calls get_sign_task_status with build_id=52679",
+        "The agent does NOT call sign_build (the user is asking about status, not requesting a new sign)",
+        "The agent's response reports the sign task status (completed/failed/in_progress/idle)"
+      ],
+      "files": []
+    },
+    {
+      "id": 26,
+      "name": "sign_then_check_status",
+      "category": "signing",
+      "prompt": "I signed build 67890 a few minutes ago. Can you check if it's done?",
+      "expected_output": "Agent calls get_sign_task_status(67890) and reports whether the sign task completed/failed. Does NOT create a new sign task.",
+      "criteria": [
+        "The agent calls get_sign_task_status with build_id=67890",
+        "The agent does NOT call sign_build (no new sign task should be created)",
+        "The agent reports the sign task status to the user"
       ],
       "files": []
     }

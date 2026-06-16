@@ -9,7 +9,7 @@ src/albs_mcp/
   constants.py   — URLs, status maps, package lists, EPEL defaults
   client.py      — ALBSClient: all HTTP calls to ALBS API and log file I/O
   _commands.py   — shared command functions: client management, formatting, business logic
-  server.py      — thin @mcp.tool() wrappers delegating to _commands.py, server instructions
+  server.py      — thin @mcp.tool() wrappers delegating to _commands.py, @mcp.prompt() workflow entry points, server instructions
   cli.py         — CLI (argparse), delegates to _commands.py functions
 tests/
   test_client_unit.py   — unit tests for ALBSClient (mocked HTTP)
@@ -20,7 +20,8 @@ tests/
 
 ## Documentation
 
-- Keep `README.md` in sync with the code. When adding, removing, or renaming tools or parameters, update the corresponding sections: "What it can do", "Tools reference", examples, and environment variables.
+- Keep `README.md` in sync with the code. When adding, removing, or renaming tools, prompts, or parameters, update the corresponding sections: "What it can do", "Tools reference", "Prompts", examples, and environment variables.
+- MCP prompts (`@mcp.prompt()` in `server.py`) are user-invoked slash-command entry points. Keep them thin: parameterize and point at the workflow that already lives in the server `instructions` — do not duplicate the workflow rationale. Every prompt needs unit tests (direct call + `mcp.get_prompt` rendering).
 - Update test counts in the "Tests" section of `README.md` when adding new tests.
 - Tool docstrings in `server.py` are exposed as MCP tool descriptions to the AI agent. Keep them accurate, concise, and up to date with the actual behavior.
 - Server instructions (the `instructions` parameter in `FastMCP()`) guide the AI agent's decision-making: when to ask the user, what defaults to apply, how to handle EPEL builds, signing workflow, etc. Update them whenever tool semantics or workflows change.
@@ -65,5 +66,6 @@ tests/
 
 - Never log, print, or return JWT tokens in tool responses or error messages.
 - Build deletion (`delete_build`) is intentionally blocked for safety. Do not remove or bypass this guard.
-- Validate file paths in log operations (`_log_path`, `download_log`, `read_log_tail`, `read_log_range`) to prevent path traversal. The resolved path must stay inside the build log directory.
+- Validate file paths in log operations (`_log_path`, `download_log`, `read_log_tail`, `read_log_range`) to prevent path traversal. Enforced in `ALBSClient._log_path`: the filename must match a strict basename whitelist (`[A-Za-z0-9._+-]+`, blocking `/`, `\`, `%`, spaces, NUL) — because the same name is interpolated into the download URL, an encoded separator could traverse on the remote host even when the local write is sandboxed — and the resolved path must additionally stay inside the build log directory (`resolve()` + `is_relative_to`, also rejecting `.`/`..`). It raises `ValueError` on any violation. Do not bypass this guard or build log URLs from unvalidated filenames.
+- `download_log` writes to a `.part` temp file and atomically renames on success, so an interrupted download never leaves a partial file that later reads would treat as complete. Keep this atomic-write property.
 - Error messages returned to the MCP client should not expose internal filesystem paths, stack traces, or sensitive details.

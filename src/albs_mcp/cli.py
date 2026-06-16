@@ -84,6 +84,10 @@ def _cmd_sign_keys(args: argparse.Namespace) -> None:
     _exec(cmd.get_sign_keys())
 
 
+def _cmd_sign_status(args: argparse.Namespace) -> None:
+    _exec(cmd.get_sign_task_status(args.build_id))
+
+
 def _cmd_flavors(args: argparse.Namespace) -> None:
     _exec(cmd.get_flavors())
 
@@ -203,6 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ── sign-keys ─────────────────────────────────────────────────────
     p = sub.add_parser("sign-keys", help="List available sign keys (requires JWT).")
     p.set_defaults(func=_cmd_sign_keys)
+
+    # ── sign-status ───────────────────────────────────────────────────
+    p = sub.add_parser("sign-status", help="Show sign task status for a build.")
+    p.add_argument("build_id", type=int)
+    p.set_defaults(func=_cmd_sign_status)
 
     # ── flavors ───────────────────────────────────────────────────────
     p = sub.add_parser("flavors", help="List all platform flavors.")

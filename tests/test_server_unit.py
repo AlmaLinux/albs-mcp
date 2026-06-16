@@ -5,14 +5,17 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
+import httpx
 import pytest
 
 import albs_mcp._commands as commands_module
 from albs_mcp.server import (
+    mcp,
     get_build_info,
     get_failed_tasks,
     get_platforms,
     get_sign_keys,
+    get_sign_task_status,
     list_build_logs,
     download_log,
     read_log_tail,
@@ -21,7 +24,15 @@ from albs_mcp.server import (
     create_build,
     sign_build,
     delete_build,
+    investigate_build,
 )
+
+
+def _http_status_error(code: int) -> httpx.HTTPStatusError:
+    """Build an httpx.HTTPStatusError for a given status code (for mocks)."""
+    request = httpx.Request("GET", "https://build.almalinux.org/api/v1/x/")
+    response = httpx.Response(code, request=request)
+    return httpx.HTTPStatusError(f"HTTP {code}", request=request, response=response)
 
 
 SAMPLE_BUILD = {
@@ -345,7 +356,8 @@ async def test_create_build_auth_error(mock_client):
 async def test_create_build_validation_error(mock_client):
     mock_client.create_build = AsyncMock(side_effect=ValueError("bad arch"))
     result = await create_build(packages=["bash"], platform="AlmaLinux-9", branch="c9s")
-    assert "Error creating build" in result
+    assert result.startswith("Error")
+    assert "bad arch" in result
 
 
 # ── create_build: git_urls ────────────────────────────────────────────
@@ -662,3 +674,152 @@ async def test_sign_build_auth_error(mock_client):
 async def test_delete_build_blocked(mock_client):
     result = await delete_build(50000)
     assert "blocked" in result.lower()
+
+
+# ── graceful errors in read-only tools ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_build_info_not_found(mock_client):
+    mock_client.get_build = AsyncMock(side_effect=_http_status_error(404))
+    result = await get_build_info(999999)
+    assert result.startswith("Error")
+    assert "not found" in result.lower()
+    assert "999999" in result
+
+
+@pytest.mark.asyncio
+async def test_get_failed_tasks_not_found(mock_client):
+    mock_client.get_build = AsyncMock(side_effect=_http_status_error(404))
+    result = await get_failed_tasks(999999)
+    assert result.startswith("Error")
+    assert "999999" in result
+
+
+@pytest.mark.asyncio
+async def test_list_build_logs_not_found(mock_client):
+    mock_client.list_build_logs = AsyncMock(side_effect=_http_status_error(404))
+    result = await list_build_logs(999999)
+    assert result.startswith("Error")
+    assert "999999" in result
+
+
+@pytest.mark.asyncio
+async def test_search_builds_network_error(mock_client):
+    mock_client.search_builds = AsyncMock(side_effect=httpx.ConnectError("boom"))
+    result = await search_builds()
+    assert result.startswith("Error")
+    assert "reach ALBS" in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_error_no_stack_trace(mock_client):
+    mock_client.read_log_tail = MagicMock(
+        side_effect=ValueError("Invalid log filename: '../x'")
+    )
+    result = await read_log_tail(50000, "../x", 10)
+    assert result.startswith("Error")
+    mock_client.download_log.assert_not_called()
+    # The message must be a single clean line, not a multi-line stack trace.
+    assert "Traceback" not in result
+    assert "\n" not in result
+
+
+# ── auto-download in read_log_* ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_read_log_tail_auto_downloads(mock_client):
+    """When the log is not on disk, read_log_tail downloads it, then reads."""
+    mock_client.read_log_tail = MagicMock(side_effect=[
+        FileNotFoundError("Log not downloaded yet"),
+        ("error: boom", 5000, 4990),
+    ])
+    result = await read_log_tail(50000, "mock_build.log", 3000)
+    mock_client.download_log.assert_awaited_once_with(50000, "mock_build.log")
+    assert "error: boom" in result
+    assert "lines 4990-5000 of 5000" in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_no_download_when_present(mock_client):
+    """If the log is already on disk, no download happens."""
+    result = await read_log_tail(50000, "mock_build.log", 3000)
+    mock_client.download_log.assert_not_called()
+    assert "error: fail" in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_range_auto_downloads(mock_client):
+    mock_client.read_log_range = MagicMock(side_effect=[
+        FileNotFoundError("Log not downloaded yet"),
+        ("line 100\nline 101", 5000),
+    ])
+    result = await read_log_range(50000, "mock_build.log", 100, 102)
+    mock_client.download_log.assert_awaited_once_with(50000, "mock_build.log")
+    assert "line 100" in result
+
+
+# ── get_sign_task_status ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_sign_task_status_tool(mock_client):
+    mock_client.get_sign_tasks = AsyncMock(return_value=[
+        {"id": 1, "build_id": 50000, "status": 3, "sign_key": {"id": 4}},
+        {"id": 2, "build_id": 50000, "status": 4, "sign_key_id": 9,
+         "error_message": "boom"},
+    ])
+    result = await get_sign_task_status(50000)
+    assert "sign_task_id=1" in result
+    assert "completed" in result
+    assert "sign_key_id=4" in result
+    assert "sign_task_id=2" in result
+    assert "failed" in result
+    assert "sign_key_id=9" in result
+    assert "boom" in result
+
+
+@pytest.mark.asyncio
+async def test_get_sign_task_status_none(mock_client):
+    mock_client.get_sign_tasks = AsyncMock(return_value=[])
+    result = await get_sign_task_status(50000)
+    assert "no sign tasks" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_sign_task_status_error(mock_client):
+    mock_client.get_sign_tasks = AsyncMock(side_effect=_http_status_error(404))
+    result = await get_sign_task_status(999999)
+    assert result.startswith("Error")
+    assert "999999" in result
+
+
+# ── investigate_build (prompt) ────────────────────────────────────────
+
+def test_investigate_build_prompt_content():
+    """The prompt interpolates the build id and seeds the investigation order."""
+    text = investigate_build("52679")
+    assert "52679" in text
+    assert "get_build_info(52679)" in text
+    assert "get_failed_tasks(52679)" in text
+    # Investigation ordering hints must survive in the seeded prompt.
+    assert text.index("mock_root") < text.index("mock_stderr") < text.index("mock_build")
+    assert "read_log_tail" in text
+
+
+@pytest.mark.asyncio
+async def test_investigate_build_prompt_registered():
+    """The prompt is registered on the MCP server with a build_id argument."""
+    prompts = await mcp.list_prompts()
+    by_name = {p.name: p for p in prompts}
+    assert "investigate_build" in by_name
+    arg_names = [a.name for a in (by_name["investigate_build"].arguments or [])]
+    assert arg_names == ["build_id"]
+
+
+@pytest.mark.asyncio
+async def test_investigate_build_prompt_renders_via_server():
+    """Rendering through get_prompt coerces the string arg into the message."""
+    result = await mcp.get_prompt("investigate_build", {"build_id": "12345"})
+    assert len(result.messages) == 1
+    msg = result.messages[0]
+    assert msg.role == "user"
+    assert "12345" in msg.content.text

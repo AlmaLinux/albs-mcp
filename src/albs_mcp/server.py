@@ -20,13 +20,14 @@ MCP server for AlmaLinux Build System (build.almalinux.org).
 1. Call get_build_info(build_id) to see all tasks and their statuses.
 2. If there are failed tasks, call get_failed_tasks(build_id) — it shows log files \
 for each failed task. Logs marked with ★ are the key ones: mock_root, mock_stderr, mock_build.
-3. Download the key log: download_log(build_id, filename). Start with mock_root \
-(chroot/dependency issues), then mock_stderr (stderr output), then mock_build (the full build log).
-4. Read from the end: read_log_tail(build_id, filename). Errors are almost always \
-at the bottom. Default is 3000 lines — this is intentional to save tokens.
-5. If the root cause is not visible in the tail, use read_log_range to look at earlier \
+3. Read the key log from the end: read_log_tail(build_id, filename). It downloads the \
+log automatically if it is not on disk yet — there is no need to call download_log first. \
+Start with mock_root (chroot/dependency issues), then mock_stderr (stderr output), then \
+mock_build (the full build log). Errors are almost always at the bottom. Default is 3000 \
+lines — this is intentional to save tokens.
+4. If the root cause is not visible in the tail, use read_log_range to look at earlier \
 sections of the log.
-6. IMPORTANT: mock_build logs can be very large (100k+ lines). NEVER try to read the \
+5. IMPORTANT: mock_build logs can be very large (100k+ lines). NEVER try to read the \
 whole file at once. Always use read_log_tail first, then read_log_range if needed.
 
 ## Creating builds (requires JWT token)
@@ -72,6 +73,8 @@ and the build targets only x86_64_v2, which indicates it should likely be \
 signed with an EPEL key.
 4. ASK the user to confirm the sign key before signing.
 5. Call sign_build(build_id, sign_key_id) to create a sign task.
+6. To check whether signing finished, call get_sign_task_status(build_id) — \
+it shows each sign task's status (idle/in_progress/completed/failed).
 
 ## Important notes
 - Read-only tools work without authentication.
@@ -133,11 +136,12 @@ async def read_log_tail(
     filename: str,
     lines: int = 3000,
 ) -> str:
-    """Read the last N lines of a downloaded log file.
+    """Read the last N lines of a build log file.
 
     Reads from the end of the file (where errors usually are).
     Default: last 3000 lines. Use read_log_range for specific sections.
-    The log must be downloaded first with download_log.
+    The log is downloaded automatically if not already on disk — no need
+    to call download_log first.
     """
     return await cmd.read_log_tail(build_id, filename, lines)
 
@@ -149,10 +153,11 @@ async def read_log_range(
     start_line: int,
     end_line: int,
 ) -> str:
-    """Read a specific range of lines from a downloaded log.
+    """Read a specific range of lines from a build log.
 
     Use this to look at earlier parts of the log after seeing the tail.
-    The log must be downloaded first with download_log.
+    The log is downloaded automatically if not already on disk — no need
+    to call download_log first.
     """
     return await cmd.read_log_range(build_id, filename, start_line, end_line)
 
@@ -180,6 +185,17 @@ async def search_builds(
         is_running: Filter by running status.
     """
     return await cmd.search_builds(page, project, is_running)
+
+
+@mcp.tool()
+async def get_sign_task_status(build_id: int) -> str:
+    """Get the status of sign tasks for a build.
+
+    Use this after sign_build to check whether signing completed or failed.
+    Returns each sign task's ID, status (idle/in_progress/completed/failed),
+    and sign key ID. No authentication required.
+    """
+    return await cmd.get_sign_task_status(build_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -328,6 +344,38 @@ async def delete_build(build_id: int) -> str:
     This operation is intentionally disabled for safety.
     """
     return await cmd.delete_build(build_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  PROMPTS  (user-invoked slash commands)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.prompt(
+    title="Investigate a failed ALBS build",
+    description="Seed the build-failure investigation workflow for a build ID.",
+)
+def investigate_build(build_id: str) -> str:
+    """User-invoked entry point for the build-failure investigation workflow.
+
+    Thin wrapper: it parameterizes the investigation workflow that already
+    lives in the server instructions by build_id. The detailed rationale
+    (why mock_root first, why read from the end) stays in the instructions
+    and is not duplicated here.
+    """
+    return (
+        f"Investigate why ALBS build {build_id} failed.\n\n"
+        "Follow the build-failure investigation workflow from the albs-mcp "
+        "server instructions:\n"
+        f"1. Call get_build_info({build_id}) to see all tasks and statuses.\n"
+        f"2. Call get_failed_tasks({build_id}) to list failed tasks and their "
+        "log files (★ marks the key logs).\n"
+        "3. For each failed task, read the key logs in order — mock_root first "
+        "(chroot/dependency issues), then mock_stderr, then mock_build — from "
+        "the end with read_log_tail (it auto-downloads) before using "
+        "read_log_range. Never read a large mock_build log from line 1.\n"
+        "4. Report the root cause of the failure, citing the log evidence."
+    )
 
 
 def main():

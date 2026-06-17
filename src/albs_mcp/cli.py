@@ -123,6 +123,28 @@ def _cmd_sign_build(args: argparse.Namespace) -> None:
     _exec(cmd.sign_build(args.build_id, args.key_id))
 
 
+def _cmd_products(args: argparse.Namespace) -> None:
+    _exec(cmd.get_products())
+
+
+def _cmd_release_plan(args: argparse.Namespace) -> None:
+    _exec(cmd.get_release_plan(args.release_id))
+
+
+def _cmd_create_release_plan(args: argparse.Namespace) -> None:
+    _exec(cmd.create_release_plan(
+        build_id=args.build_id,
+        platform=args.platform,
+        product=args.product,
+        build_ids=args.add_build or None,
+        whole_packages_only=args.whole_packages_only,
+    ))
+
+
+def _cmd_commit_release(args: argparse.Namespace) -> None:
+    _exec(cmd.commit_release(args.release_id))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Parser construction
 # ═══════════════════════════════════════════════════════════════════════
@@ -133,7 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="albs",
         description=(
             "CLI for AlmaLinux Build System (build.almalinux.org). "
-            "Investigate build failures, create builds, sign packages."
+            "Investigate build failures, create builds, sign packages, "
+            "create release plans."
         ),
     )
     parser.add_argument(
@@ -293,6 +316,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sign key ID (default: 4; use sign-keys to list).",
     )
     p.set_defaults(func=_cmd_sign_build)
+
+    # ── products ──────────────────────────────────────────────────────
+    p = sub.add_parser("products", help="List all products (release targets).")
+    p.set_defaults(func=_cmd_products)
+
+    # ── release-plan ──────────────────────────────────────────────────
+    p = sub.add_parser("release-plan", help="View an existing release plan.")
+    p.add_argument("release_id", type=int)
+    p.set_defaults(func=_cmd_release_plan)
+
+    # ── create-release-plan ───────────────────────────────────────────
+    p = sub.add_parser(
+        "create-release-plan",
+        help="Create a release plan (requires JWT). Never performs the release.",
+    )
+    p.add_argument("build_id", type=int)
+    p.add_argument("--platform", required=True, help="Target platform name.")
+    p.add_argument(
+        "--product", required=True,
+        help="Target product name (use 'products' to list).",
+    )
+    p.add_argument(
+        "--add-build", action="append", type=int, default=[],
+        help="Additional build ID to include in the plan (repeat for multiple).",
+    )
+    p.add_argument(
+        "--whole-packages-only", dest="whole_packages_only",
+        action="store_true",
+        help=(
+            "Include only packages whose every arch task completed "
+            "(drop half-built packages). For PARTIAL builds."
+        ),
+    )
+    p.set_defaults(func=_cmd_create_release_plan)
+
+    # ── commit-release ────────────────────────────────────────────────
+    p = sub.add_parser(
+        "commit-release",
+        help="Commit (perform) a release. Blocked — only plans are supported.",
+    )
+    p.add_argument("release_id", type=int)
+    p.set_defaults(func=_cmd_commit_release)
 
     return parser
 

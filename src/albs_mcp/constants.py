@@ -13,11 +13,26 @@ BUILD_TASK_STATUS = {
 
 BUILD_TASK_STATUS_BY_NAME = {v: k for k, v in BUILD_TASK_STATUS.items()}
 
+# Build task status that means "built successfully". A release plan may only
+# include tasks in this state — half-built packages must never leak into a plan.
+BUILD_TASK_COMPLETED = 2
+
 SIGN_TASK_STATUS = {
     1: "idle",
     2: "in_progress",
     3: "completed",
     4: "failed",
+}
+
+# Release lifecycle status. A freshly created release PLAN is "scheduled";
+# it only becomes published after a commit (the actual release), which this
+# project intentionally does not perform.
+RELEASE_STATUS = {
+    1: "scheduled",
+    2: "in_progress",
+    3: "completed",
+    4: "failed",
+    5: "reverted",
 }
 
 SECURE_BOOT_PACKAGES = [

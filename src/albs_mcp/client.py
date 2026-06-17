@@ -12,6 +12,7 @@ from .constants import (
     ALBS_API,
     ALBS_LOGS_BASE,
     BETA_PLATFORM_FLAVORS,
+    BUILD_TASK_COMPLETED,
     SECURE_BOOT_PACKAGES,
 )
 
@@ -23,6 +24,42 @@ def extract_el_version(pkg_name: str) -> str | None:
     return match.group(0) if match else None
 
 
+def get_completed_task_ids(build_info: dict[str, Any]) -> list[int]:
+    """IDs of build tasks that completed successfully.
+
+    A release plan may only reference completed tasks; failed / excluded /
+    still-running tasks are skipped.
+    """
+    return [
+        t["id"]
+        for t in build_info.get("tasks", [])
+        if t.get("status") == BUILD_TASK_COMPLETED
+    ]
+
+
+def get_whole_package_task_ids(build_info: dict[str, Any]) -> list[int]:
+    """Task IDs only for packages whose EVERY architecture task completed.
+
+    Tasks are grouped by their source ref URL (one package → N arch tasks).
+    A package is included only if all of its arch tasks completed; any package
+    with a failed / excluded / still-running task is dropped entirely, so a
+    "half-built" package never leaks into a release plan. Use this for a
+    PARTIAL build (e.g. one superseded by a 'retry failed' build).
+    """
+    by_url: dict[str, list[dict[str, Any]]] = {}
+    for t in build_info.get("tasks", []):
+        url = (t.get("ref") or {}).get("url", "")
+        by_url.setdefault(url, []).append(t)
+
+    result: list[int] = []
+    for tasks in by_url.values():
+        if tasks and all(
+            t.get("status") == BUILD_TASK_COMPLETED for t in tasks
+        ):
+            result.extend(t["id"] for t in tasks)
+    return result
+
+
 class ALBSClient:
     def __init__(self, jwt_token: str | None = None, timeout: float = 30.0):
         self.jwt_token = jwt_token
@@ -30,6 +67,8 @@ class ALBSClient:
         self._log_dir = Path(os.environ.get("ALBS_LOG_DIR", "/tmp/albs-logs"))
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._platforms_cache: dict[str, list[str]] | None = None
+        self._platform_ids_cache: dict[str, int] | None = None
+        self._products_cache: dict[str, int] | None = None
 
     @property
     def _auth_headers(self) -> dict[str, str]:
@@ -56,6 +95,42 @@ class ALBSClient:
             }
         return self._platforms_cache
 
+    async def get_platform_ids(self) -> dict[str, int]:
+        """Get {platform_name: platform_id} mapping, cached after first call.
+
+        Needed to resolve a platform name to the numeric id a release plan
+        expects.
+        """
+        if self._platform_ids_cache is None:
+            platforms = await self.get_platforms()
+            self._platform_ids_cache = {p["name"]: p["id"] for p in platforms}
+        return self._platform_ids_cache
+
+    # ── Products (no auth) ────────────────────────────────────────────
+
+    async def get_products(self) -> list[dict[str, Any]]:
+        """Get all products from ALBS.
+
+        The endpoint returns a plain list of every product (it is not
+        paginated when no pageNumber is passed); some deployments instead
+        wrap it as {"products": [...]}, so both shapes are handled.
+        """
+        r = await self._http.get(f"{ALBS_API}/products/")
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else data.get("products", [])
+
+    async def get_product_ids(self) -> dict[str, int]:
+        """Get {product_name: product_id} mapping, cached after first call.
+
+        Needed to resolve a product name to the numeric id a release plan
+        expects.
+        """
+        if self._products_cache is None:
+            products = await self.get_products()
+            self._products_cache = {p["name"]: p["id"] for p in products}
+        return self._products_cache
+
     async def get_build(self, build_id: int) -> dict[str, Any]:
         r = await self._http.get(f"{ALBS_API}/builds/{build_id}/")
         r.raise_for_status()
@@ -80,6 +155,12 @@ class ALBSClient:
         r = await self._http.get(
             f"{ALBS_API}/sign-tasks/", params={"build_id": build_id}
         )
+        r.raise_for_status()
+        return r.json()
+
+    async def get_release(self, release_id: int) -> dict[str, Any]:
+        """Get a single release with its computed plan and status. No auth."""
+        r = await self._http.get(f"{ALBS_API}/releases/{release_id}/")
         r.raise_for_status()
         return r.json()
 
@@ -351,6 +432,33 @@ class ALBSClient:
             f"{ALBS_API}/sign-tasks/",
             json={"build_id": build_id, "sign_key_id": sign_key_id},
             headers=self._auth_headers,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def create_release(
+        self,
+        build_ids: list[int],
+        build_task_ids: list[int],
+        platform_id: int,
+        product_id: int,
+    ) -> dict[str, Any]:
+        """Create a release PLAN in ALBS (status: scheduled). Requires JWT.
+
+        Posts to /releases/new/, which creates the scheduled release record
+        and computes the plan (which packages go to which repositories). It
+        does NOT publish anything — publishing happens only when the plan is
+        committed, which this client intentionally never does. Returns the
+        created release dict (id, status, plan, ...).
+        """
+        payload = {
+            "builds": build_ids,
+            "build_tasks": build_task_ids,
+            "platform_id": platform_id,
+            "product_id": product_id,
+        }
+        r = await self._http.post(
+            f"{ALBS_API}/releases/new/", json=payload, headers=self._auth_headers
         )
         r.raise_for_status()
         return r.json()

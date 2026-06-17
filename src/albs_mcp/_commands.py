@@ -12,11 +12,16 @@ from pathlib import Path
 
 import httpx
 
-from .client import ALBSClient
+from .client import (
+    ALBSClient,
+    get_completed_task_ids,
+    get_whole_package_task_ids,
+)
 from .constants import (
     BUILD_TASK_STATUS,
     KEY_LOG_TYPES,
     LOG_LINES_PER_CHUNK,
+    RELEASE_STATUS,
     SIGN_TASK_STATUS,
 )
 
@@ -337,6 +342,114 @@ async def get_sign_task_status(build_id: int) -> str:
     return "\n".join(lines)
 
 
+async def get_products() -> str:
+    client = _get_client()
+    try:
+        products = await client.get_products()
+    except Exception as e:
+        return _api_error("getting products", e)
+    if not products:
+        return "No products available."
+    lines = [f"Products ({len(products)}):", ""]
+    for p in sorted(products, key=lambda x: x.get("name", "").lower()):
+        plats = ", ".join(
+            pl.get("name", "") for pl in p.get("platforms", [])
+        )
+        kind = "community" if p.get("is_community") else "official"
+        line = f"  id={p['id']:<5} {p['name']:30} [{kind}]"
+        if plats:
+            line += f"  platforms: {plats}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _format_release_plan(release: dict, *, created: bool) -> str:
+    """Format a release (plan + status) for the MCP client / CLI.
+
+    Used both right after creating a plan and when viewing an existing one.
+    Lists the source packages the plan would release and the target
+    repositories, without dumping every per-arch RPM.
+    """
+    rid = release.get("id")
+    raw_status = release.get("status")
+    status = RELEASE_STATUS.get(raw_status, f"unknown({raw_status})")
+    plan = release.get("plan") or {}
+    packages = plan.get("packages") or []
+    repos = plan.get("repositories") or []
+
+    product = release.get("product")
+    product_name = product.get("name") if isinstance(product, dict) else product
+    platform = release.get("platform")
+    platform_name = (
+        platform.get("name") if isinstance(platform, dict) else platform
+    )
+
+    title = (
+        f"Release plan #{rid} created" if created else f"Release plan #{rid}"
+    )
+    lines = [title, ""]
+    lines.append(f"Status: {status}")
+    if product_name:
+        lines.append(f"Product: {product_name}")
+    if platform_name:
+        lines.append(f"Platform: {platform_name}")
+    if release.get("build_ids") is not None:
+        lines.append(f"Builds: {release['build_ids']}")
+    lines.append(f"Build tasks: {len(release.get('build_task_ids') or [])}")
+
+    # Distinct source packages (one per src.rpm), preserving plan order.
+    sources: list[str] = []
+    seen: set[str] = set()
+    for entry in packages:
+        pkg = entry.get("package") or {}
+        nvr = "-".join(
+            str(pkg.get(k, "")) for k in ("name", "version", "release")
+        ).strip("-")
+        if nvr and nvr not in seen:
+            seen.add(nvr)
+            sources.append(nvr)
+
+    lines.append(
+        f"Packages in plan: {len(packages)} "
+        f"({len(sources)} source package(s))"
+    )
+    limit = 50
+    for nvr in sources[:limit]:
+        lines.append(f"  - {nvr}")
+    if len(sources) > limit:
+        lines.append(f"  ... (+{len(sources) - limit} more)")
+
+    if repos:
+        lines.append("")
+        lines.append(f"Target repositories ({len(repos)}):")
+        for repo in repos[:limit]:
+            arch = repo.get("arch", "")
+            name = repo.get("name", "")
+            lines.append(f"  - {name} ({arch})")
+        if len(repos) > limit:
+            lines.append(f"  ... (+{len(repos) - limit} more)")
+
+    if created:
+        lines.append("")
+        lines.append(f"URL: https://build.almalinux.org/release/{rid}")
+        lines.append("")
+        lines.append(
+            "NOTE: This is only a release PLAN (status: scheduled). No "
+            "packages have been published. Committing the plan — the actual "
+            "release — is intentionally NOT supported by this MCP."
+        )
+    return "\n".join(lines)
+
+
+async def get_release_plan(release_id: int) -> str:
+    client = _get_client()
+    try:
+        release = await client.get_release(release_id)
+    except Exception as e:
+        return _api_error(f"getting release #{release_id}", e)
+    return _format_release_plan(release, created=False)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Authenticated commands
 # ═══════════════════════════════════════════════════════════════════════
@@ -533,6 +646,122 @@ async def sign_build(build_id: int, sign_key_id: int = 4) -> str:
         )
     except Exception as e:
         return _api_error("signing build", e)
+
+
+async def create_release_plan(
+    build_id: int,
+    platform: str,
+    product: str,
+    build_ids: list[int] | None = None,
+    whole_packages_only: bool = False,
+) -> str:
+    """Create a release PLAN (status: scheduled) — never commits/publishes.
+
+    Resolves platform and product names to ids, collects the completed build
+    tasks across the given build(s), and asks ALBS to compute the plan.
+
+    Args:
+        build_id: Primary build to release.
+        platform: Target platform name (e.g. "AlmaLinux-9").
+        product: Target product name (e.g. "AlmaLinux", "epel-al").
+        build_ids: Optional extra build ids to include in the same plan.
+        whole_packages_only: Include only packages whose every arch task
+            completed (drop half-built packages). Default False.
+    """
+    client = _get_client()
+
+    # Creating a release plan is an authenticated write. Fail fast before
+    # making any (public) read calls so a missing token returns immediately
+    # with a clear auth error instead of doing pointless work.
+    if not client.jwt_token:
+        return (
+            "Auth error: creating a release plan requires a JWT token. "
+            "Pass --token or set ALBS_JWT_TOKEN."
+        )
+
+    try:
+        platform_ids = await client.get_platform_ids()
+    except Exception as e:
+        return _api_error("getting platforms", e)
+    if platform not in platform_ids:
+        return (
+            f"Error: unknown platform '{platform}'. "
+            f"Available: {', '.join(sorted(platform_ids))}"
+        )
+    platform_id = platform_ids[platform]
+
+    try:
+        product_ids = await client.get_product_ids()
+    except Exception as e:
+        return _api_error("getting products", e)
+    if product not in product_ids:
+        return (
+            f"Error: unknown product '{product}'. "
+            f"Available: {', '.join(sorted(product_ids))}"
+        )
+    product_id = product_ids[product]
+
+    # Primary build first, then any extras (de-duplicated, order preserved).
+    all_build_ids: list[int] = [build_id]
+    for bid in build_ids or []:
+        if bid not in all_build_ids:
+            all_build_ids.append(bid)
+
+    task_ids: list[int] = []
+    for bid in all_build_ids:
+        try:
+            info = await client.get_build(bid)
+        except Exception as e:
+            return _api_error(f"getting build #{bid}", e)
+        ids = (
+            get_whole_package_task_ids(info)
+            if whole_packages_only
+            else get_completed_task_ids(info)
+        )
+        task_ids.extend(ids)
+
+    if not task_ids:
+        scope = (
+            "fully-completed packages"
+            if whole_packages_only
+            else "completed tasks"
+        )
+        return (
+            f"Error: no {scope} found in build(s) {all_build_ids}. "
+            "A release plan needs completed build tasks."
+        )
+
+    try:
+        release = await client.create_release(
+            build_ids=all_build_ids,
+            build_task_ids=task_ids,
+            platform_id=platform_id,
+            product_id=product_id,
+        )
+    except Exception as e:
+        return _api_error("creating release plan", e)
+
+    if not release.get("id"):
+        return f"Error: ALBS release creation returned no id: {release}"
+
+    # The /new/ response usually already carries the computed plan; if a
+    # deployment returns only the id, fetch the full release to show it.
+    if not (release.get("plan") or {}).get("packages"):
+        try:
+            release = await client.get_release(release["id"])
+        except Exception:
+            pass  # fall back to the create response — id/status still useful
+
+    return _format_release_plan(release, created=True)
+
+
+async def commit_release(release_id: int) -> str:
+    return (
+        "Committing a release (the actual release that publishes packages) "
+        "is intentionally blocked.\n"
+        "This MCP only creates release plans. Commit it manually in the "
+        "build system if you really intend to publish."
+    )
 
 
 async def delete_build(build_id: int) -> str:

@@ -25,6 +25,11 @@ from albs_mcp.server import (
     sign_build,
     delete_build,
     investigate_build,
+    get_products,
+    get_release_plan,
+    create_release_plan,
+    commit_release,
+    release_plan,
 )
 
 
@@ -133,6 +138,52 @@ def mock_client():
     client.read_log_range = MagicMock(return_value=("line 100\nline 101", 5000))
     client.create_build = AsyncMock(return_value={"id": 99999, "created_at": "2026-03-10T00:00:00"})
     client.sign_build = AsyncMock(return_value={"id": 888, "status": 1})
+    client.get_platform_ids = AsyncMock(return_value={
+        "AlmaLinux-9": 2, "AlmaLinux-10": 3,
+    })
+    client.get_products = AsyncMock(return_value=[
+        {"id": 1, "name": "AlmaLinux", "is_community": False,
+         "platforms": [{"name": "AlmaLinux-9"}]},
+        {"id": 613, "name": "epel-al", "is_community": True,
+         "platforms": [{"name": "AlmaLinux-10"}]},
+    ])
+    client.get_product_ids = AsyncMock(return_value={
+        "AlmaLinux": 1, "epel-al": 613,
+    })
+    client.create_release = AsyncMock(return_value={
+        "id": 4242,
+        "status": 1,
+        "build_ids": [50000],
+        "build_task_ids": [300001],
+        "plan": {
+            "packages": [
+                {"package": {"name": "glibc", "version": "2.34",
+                             "release": "1.el9", "arch": "src"}},
+            ],
+            "repositories": [
+                {"id": 1, "name": "almalinux-9-baseos", "arch": "src"},
+            ],
+        },
+        "product": {"name": "AlmaLinux"},
+        "platform": {"name": "AlmaLinux-9"},
+    })
+    client.get_release = AsyncMock(return_value={
+        "id": 4242,
+        "status": 3,
+        "build_ids": [50000],
+        "build_task_ids": [300001],
+        "plan": {
+            "packages": [
+                {"package": {"name": "glibc", "version": "2.34",
+                             "release": "1.el9", "arch": "src"}},
+            ],
+            "repositories": [
+                {"id": 1, "name": "almalinux-9-baseos", "arch": "src"},
+            ],
+        },
+        "product": {"name": "AlmaLinux"},
+        "platform": {"name": "AlmaLinux-9"},
+    })
     commands_module._client = client
     return client
 
@@ -823,3 +874,178 @@ async def test_investigate_build_prompt_renders_via_server():
     msg = result.messages[0]
     assert msg.role == "user"
     assert "12345" in msg.content.text
+
+
+# ── get_products ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_products_tool(mock_client):
+    result = await get_products()
+    assert "AlmaLinux" in result
+    assert "epel-al" in result
+    assert "official" in result
+    assert "community" in result
+    assert "id=1" in result
+
+
+@pytest.mark.asyncio
+async def test_get_products_empty(mock_client):
+    mock_client.get_products = AsyncMock(return_value=[])
+    result = await get_products()
+    assert "No products" in result
+
+
+@pytest.mark.asyncio
+async def test_get_products_error(mock_client):
+    mock_client.get_products = AsyncMock(side_effect=_http_status_error(500))
+    result = await get_products()
+    assert result.startswith("Error")
+
+
+# ── create_release_plan ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_release_plan_tool(mock_client):
+    result = await create_release_plan(50000, "AlmaLinux-9", "AlmaLinux")
+    assert "Release plan #4242 created" in result
+    assert "scheduled" in result
+    assert "glibc-2.34-1.el9" in result
+    assert "almalinux-9-baseos" in result
+    # The plan must announce that nothing was published.
+    assert "only a release PLAN" in result
+    # Completed task (status 2) collected, failed ones (status 3) skipped.
+    payload = mock_client.create_release.call_args[1]
+    assert payload["build_task_ids"] == [300001]
+    assert payload["platform_id"] == 2
+    assert payload["product_id"] == 1
+    assert payload["build_ids"] == [50000]
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_unknown_platform(mock_client):
+    result = await create_release_plan(50000, "Nonexistent", "AlmaLinux")
+    assert result.startswith("Error")
+    assert "unknown platform" in result
+    mock_client.create_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_unknown_product(mock_client):
+    result = await create_release_plan(50000, "AlmaLinux-9", "no-such-product")
+    assert result.startswith("Error")
+    assert "unknown product" in result
+    mock_client.create_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_no_completed_tasks(mock_client):
+    # A build where every task failed → nothing to release.
+    mock_client.get_build = AsyncMock(return_value={
+        "tasks": [{"id": 1, "status": 3, "ref": {"url": "u/x"}}],
+    })
+    result = await create_release_plan(50000, "AlmaLinux-9", "AlmaLinux")
+    assert result.startswith("Error")
+    assert "no completed tasks" in result
+    mock_client.create_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_extra_builds(mock_client):
+    await create_release_plan(
+        50000, "AlmaLinux-9", "AlmaLinux", build_ids=[50001, 50000]
+    )
+    payload = mock_client.create_release.call_args[1]
+    # primary first, extras de-duplicated (50000 already present)
+    assert payload["build_ids"] == [50000, 50001]
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_auth_error(mock_client):
+    mock_client.create_release = AsyncMock(
+        side_effect=PermissionError("JWT token required")
+    )
+    result = await create_release_plan(50000, "AlmaLinux-9", "AlmaLinux")
+    assert result.startswith("Auth error")
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_requires_token_fails_fast(mock_client):
+    """No token → immediate auth error, before any API read calls."""
+    mock_client.jwt_token = None
+    result = await create_release_plan(50000, "AlmaLinux-9", "AlmaLinux")
+    assert result.startswith("Auth error")
+    assert "JWT token" in result
+    # Must not have done any work: no platform/product/build lookups, no POST.
+    mock_client.get_platform_ids.assert_not_called()
+    mock_client.get_product_ids.assert_not_called()
+    mock_client.get_build.assert_not_called()
+    mock_client.create_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_release_plan_refetches_when_plan_missing(mock_client):
+    """If /new/ returns only an id, the full release is fetched for display."""
+    mock_client.create_release = AsyncMock(return_value={"id": 4242})
+    result = await create_release_plan(50000, "AlmaLinux-9", "AlmaLinux")
+    mock_client.get_release.assert_awaited_once_with(4242)
+    assert "glibc-2.34-1.el9" in result
+
+
+# ── get_release_plan ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_release_plan_tool(mock_client):
+    result = await get_release_plan(4242)
+    assert "Release plan #4242" in result
+    assert "completed" in result
+    assert "glibc-2.34-1.el9" in result
+    # Viewing an existing plan must NOT show the "created" publish note.
+    assert "only a release PLAN" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_release_plan_not_found(mock_client):
+    mock_client.get_release = AsyncMock(side_effect=_http_status_error(404))
+    result = await get_release_plan(999999)
+    assert result.startswith("Error")
+    assert "999999" in result
+
+
+# ── commit_release (blocked) ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_commit_release_blocked(mock_client):
+    result = await commit_release(4242)
+    assert "blocked" in result.lower()
+    assert "only creates release plans" in result
+
+
+# ── release_plan (prompt) ─────────────────────────────────────────────
+
+def test_release_plan_prompt_content():
+    text = release_plan("52679")
+    assert "52679" in text
+    assert "get_build_info(52679)" in text
+    assert "get_products()" in text
+    assert "create_release_plan(52679" in text
+    # Must steer the agent away from the actual release.
+    assert "commit_release" in text
+    assert "only create the plan" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_release_plan_prompt_registered():
+    prompts = await mcp.list_prompts()
+    by_name = {p.name: p for p in prompts}
+    assert "release_plan" in by_name
+    arg_names = [a.name for a in (by_name["release_plan"].arguments or [])]
+    assert arg_names == ["build_id"]
+
+
+@pytest.mark.asyncio
+async def test_release_plan_prompt_renders_via_server():
+    result = await mcp.get_prompt("release_plan", {"build_id": "52679"})
+    assert len(result.messages) == 1
+    msg = result.messages[0]
+    assert msg.role == "user"
+    assert "52679" in msg.content.text

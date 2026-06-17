@@ -23,12 +23,15 @@ Two ways to use:
 - **Get platforms** — dynamically fetched list of all platforms and their supported architectures.
 - **Download and read logs** — any log file from any build, with smart pagination (tail first, then range). Reading auto-downloads the log if it isn't on disk yet.
 - **Check sign status** — see whether sign tasks for a build completed or failed.
+- **List products** — all release targets (products) with their platforms, official/community flag, and IDs.
+- **View release plans** — status, source packages, and target repositories of any existing release.
 
 ### With a JWT token (authenticated)
 
 - **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without.
 - **Sign builds** — create sign tasks with a chosen key.
 - **List sign keys** — see available keys with IDs and platform mappings.
+- **Create release plans** — build a *scheduled* release plan for a build (which packages go to which repositories) targeting a chosen platform + product. **The actual release is never performed** — this only creates the plan; committing/publishing is intentionally blocked.
 - **Delete builds** — intentionally blocked for safety.
 
 ### Log types
@@ -153,6 +156,16 @@ albs sign-build 52679 --key-id 4
 # Check whether signing finished
 albs sign-status 52679
 
+# List products (release targets) and view an existing release plan
+albs products
+albs release-plan 39229
+
+# Create a release plan (requires JWT) — never performs the actual release
+albs create-release-plan 62316 --platform AlmaLinux-8 --product AlmaLinux
+# Release a PARTIAL build (only fully-completed packages):
+albs create-release-plan 62316 --platform AlmaLinux-8 --product AlmaLinux \
+    --whole-packages-only
+
 # Pass token via flag or env var
 albs --token "eyJ..." sign-keys
 ALBS_JWT_TOKEN="eyJ..." albs sign-keys
@@ -175,6 +188,8 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `read_log_range` | Read a specific line range from a log; auto-downloads if needed |
 | `search_builds` | Browse builds by page, filter by package name or running status |
 | `get_sign_task_status` | Status of a build's sign tasks (idle/in_progress/completed/failed) — use after `sign_build` |
+| `get_products` | List all products (release targets): ID, name, official/community, platforms |
+| `get_release_plan` | View an existing release: status, source packages, target repositories |
 
 ### Authenticated (JWT required)
 
@@ -183,6 +198,8 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `get_sign_keys` | List sign keys: ID, name, GPG keyid, active status, platform mappings |
 | `create_build` | Create a build: packages or custom Git URLs + platform(s) + branch/tag/srpm, with all mock options |
 | `sign_build` | Create a sign task for a build with a chosen key |
+| `create_release_plan` | Create a *scheduled* release plan for a build + platform + product. **Never performs the actual release** — only the plan |
+| `commit_release` | **Blocked** — performing the actual release is disabled; only plans are supported |
 | `delete_build` | **Blocked** — disabled for safety |
 
 ## Prompts
@@ -192,14 +209,16 @@ MCP prompts are user-invoked workflow entry points. In clients like Claude Code 
 | Prompt | Arguments | Description |
 |---|---|---|
 | `investigate_build` | `build_id` | Seeds the build-failure investigation workflow for a build ID. Equivalent to asking "why did build N fail?", but as a one-step parameterized command. |
+| `release_plan` | `build_id` | Seeds the release-plan workflow for a build ID (confirm platform, pick product, create the plan). **Never performs the actual release.** |
 
 Example (Claude Code):
 
 ```
 /mcp__albs__investigate_build 52679
+/mcp__albs__release_plan 52679
 ```
 
-This expands into the investigation workflow (`get_build_info` → `get_failed_tasks` → download/read the key logs in order), parameterized by the build ID.
+`investigate_build` expands into the investigation workflow (`get_build_info` → `get_failed_tasks` → download/read the key logs in order), parameterized by the build ID. `release_plan` expands into the release-plan workflow (`get_build_info` → `get_products` → `create_release_plan`), and explicitly stops at the plan — it never commits/publishes.
 
 ## Example: investigating a failed build
 
@@ -241,6 +260,19 @@ create_build(git_urls=["https://github.com/ykohut/leapp-data.git"], platform="Al
 
 Architectures default to each platform's full list. When `arch_list` is specified with multiple platforms, it is validated against each platform individually.
 
+## Example: creating a release plan
+
+Ask the agent: *"Create a release plan for build 62316 on AlmaLinux-8."*
+
+The agent will:
+
+1. **`get_build_info(62316)`** — confirms the platform and that the build has completed tasks
+2. **`get_products()`** — lists products so you can pick the target (e.g. `AlmaLinux`)
+3. **`create_release_plan(build_id=62316, platform="AlmaLinux-8", product="AlmaLinux")`** — collects the completed build tasks, resolves the platform/product names to IDs, and creates a *scheduled* plan
+4. Reports the plan (status, source packages, target repositories) and makes clear that **nothing was published** — it is only a plan
+
+> The actual release (committing/publishing the plan) is intentionally **not** performed. Asking the agent to "release for real" routes to `commit_release`, which is blocked and explains that only plans are supported.
+
 ## Tests
 
 ```bash
@@ -249,7 +281,7 @@ pip install -e ".[test]"
 # Unit tests (no network)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
-# Integration tests (hits real ALBS API, read-only, 21 tests)
+# Integration tests (hits real ALBS API, read-only, 26 tests)
 pytest tests/test_integration.py -v
 
 # All tests

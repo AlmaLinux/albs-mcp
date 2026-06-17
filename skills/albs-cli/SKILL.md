@@ -2,11 +2,12 @@
 name: albs-cli
 description: >-
   Use the `albs` CLI to work with AlmaLinux Build System (build.almalinux.org).
-  Investigate build failures, create builds, sign packages via shell commands.
-  Use whenever the user asks about ALBS builds, build failures, build logs,
-  package building status, or wants to create/sign builds. Also use when the
-  user says "albs", "build failed", "why did the build fail", "build a package",
-  "sign a build", or mentions build IDs in the context of AlmaLinux.
+  Investigate build failures, create builds, sign packages, create release plans
+  via shell commands. Use whenever the user asks about ALBS builds, build
+  failures, build logs, package building status, or wants to create/sign builds
+  or create a release plan. Also use when the user says "albs", "build failed",
+  "why did the build fail", "build a package", "sign a build", "release plan",
+  or mentions build IDs in the context of AlmaLinux.
 ---
 
 # ALBS CLI
@@ -28,6 +29,10 @@ albs sign-keys                              # list sign keys (requires JWT)
 albs flavors                                # list platform flavors
 albs create-build PLATFORM PKG [PKG...]     # create build (requires JWT)
 albs sign-build BUILD_ID [--key-id N]       # sign build (requires JWT)
+albs products                               # list products (release targets)
+albs release-plan RELEASE_ID                # view an existing release plan
+albs create-release-plan BUILD_ID \         # create a release plan (requires JWT)
+  --platform NAME --product NAME            #   (never performs the actual release)
 ```
 
 Authentication: `--token TOKEN` flag or `ALBS_JWT_TOKEN` env var.
@@ -93,9 +98,29 @@ albs create-build AlmaLinux-10 https://dl.fedoraproject.org/.../pkg.src.rpm \
 4. ASK user to confirm key before signing.
 5. `albs sign-build BUILD_ID --key-id N`
 
+## Creating release plans
+
+This CLI can CREATE a release plan but NEVER performs the actual release (it does not commit/publish). Creating a plan is safe — ALBS records a "scheduled" release and computes which packages go where, but nothing is published.
+
+1. `albs build-info BUILD_ID` — confirm the platform and that the build has completed tasks.
+2. `albs products` — list products (release targets) so the user can pick one. ASK the user for the target platform and product.
+3. `albs create-release-plan BUILD_ID --platform NAME --product NAME` — collects the completed build tasks automatically and creates the scheduled plan.
+4. For a PARTIAL build superseded by a 'retry failed' build, add `--whole-packages-only` so only packages whose every arch task completed are included.
+5. Report the plan (status, source packages, target repositories). Make clear that NOTHING was published — it is only a plan.
+6. `albs release-plan RELEASE_ID` — view an existing plan later.
+
+```bash
+albs products
+albs create-release-plan 62316 --platform AlmaLinux-8 --product AlmaLinux
+```
+
+The actual release (`albs commit-release`) is intentionally blocked — only plans are supported.
+
 ## Important
 
 - Read-only commands work without authentication.
-- Build creation, signing, and sign key listing require a JWT token.
+- Build/release-plan creation, signing, and sign key listing require a JWT token.
+- `products`, `release-plan` (viewing) are read-only.
 - Build deletion is intentionally blocked.
+- Performing/committing a release is intentionally blocked — only release plans are created, never the actual release.
 - Platform names are case-sensitive (e.g. `AlmaLinux-Kitten-10`). Use `albs platforms` to verify.

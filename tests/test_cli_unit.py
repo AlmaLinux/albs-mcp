@@ -460,3 +460,91 @@ def test_exception_returns_exit_code_1():
         code, out = _invoke(["platforms"])
     assert code == 1
     assert "connection failed" in out
+
+
+# ── products / release plans ──────────────────────────────────────────
+
+
+def test_release_subcommands_registered():
+    parser = build_parser()
+    for action in parser._subparsers._group_actions:
+        if hasattr(action, "choices") and action.choices:
+            choices = list(action.choices.keys())
+            break
+    else:
+        choices = []
+    assert "products" in choices
+    assert "release-plan" in choices
+    assert "create-release-plan" in choices
+    assert "commit-release" in choices
+
+
+def test_products():
+    with patch("albs_mcp._commands.get_products", new_callable=AsyncMock) as mock:
+        mock.return_value = "Products (2):\n  id=1 AlmaLinux"
+        code, out = _invoke(["products"])
+    assert code == 0
+    assert "AlmaLinux" in out
+    mock.assert_awaited_once()
+
+
+def test_release_plan_view():
+    with patch("albs_mcp._commands.get_release_plan", new_callable=AsyncMock) as mock:
+        mock.return_value = "Release plan #4242\nStatus: completed"
+        code, out = _invoke(["release-plan", "4242"])
+    assert code == 0
+    assert "Release plan #4242" in out
+    mock.assert_awaited_once_with(4242)
+
+
+def test_create_release_plan():
+    with patch(
+        "albs_mcp._commands.create_release_plan", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Release plan #4242 created"
+        code, out = _invoke([
+            "create-release-plan", "50000",
+            "--platform", "AlmaLinux-9", "--product", "AlmaLinux",
+        ])
+    assert code == 0
+    assert "Release plan #4242 created" in out
+    call_kw = mock.call_args[1]
+    assert call_kw["build_id"] == 50000
+    assert call_kw["platform"] == "AlmaLinux-9"
+    assert call_kw["product"] == "AlmaLinux"
+    assert call_kw["build_ids"] is None
+    assert call_kw["whole_packages_only"] is False
+
+
+def test_create_release_plan_with_extras_and_whole():
+    with patch(
+        "albs_mcp._commands.create_release_plan", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Release plan #1 created"
+        code, out = _invoke([
+            "create-release-plan", "50000",
+            "--platform", "AlmaLinux-9", "--product", "epel-al",
+            "--add-build", "50001", "--add-build", "50002",
+            "--whole-packages-only",
+        ])
+    assert code == 0
+    call_kw = mock.call_args[1]
+    assert call_kw["build_ids"] == [50001, 50002]
+    assert call_kw["whole_packages_only"] is True
+
+
+def test_create_release_plan_requires_platform_and_product():
+    """Missing required --platform/--product is an argparse error (exit 2)."""
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["create-release-plan", "50000"])
+    assert exc.value.code == 2
+
+
+def test_commit_release_blocked():
+    with patch("albs_mcp._commands.commit_release", new_callable=AsyncMock) as mock:
+        mock.return_value = "Committing a release ... is intentionally blocked."
+        code, out = _invoke(["commit-release", "4242"])
+    assert code == 0
+    assert "blocked" in out.lower()
+    mock.assert_awaited_once_with(4242)

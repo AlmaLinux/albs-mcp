@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from albs_mcp.client import ALBSClient, extract_el_version
+from albs_mcp.client import (
+    ALBSClient,
+    extract_el_version,
+    get_completed_task_ids,
+    get_whole_package_task_ids,
+)
 from albs_mcp.constants import ALBS_API
 
 
@@ -1005,3 +1010,169 @@ def test_log_path(client, tmp_log_dir):
     path = client._log_path(12345, "test.log")
     assert path == tmp_log_dir / "12345" / "test.log"
     assert path.parent.exists()
+
+
+# ── get_platform_ids ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_platform_ids_mapping(client):
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_PLATFORMS))
+    ids = await client.get_platform_ids()
+    assert ids == {"AlmaLinux-8": 1, "AlmaLinux-9": 2, "AlmaLinux-10": 3}
+
+
+@pytest.mark.asyncio
+async def test_get_platform_ids_cached(client):
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_PLATFORMS))
+    ids1 = await client.get_platform_ids()
+    ids2 = await client.get_platform_ids()
+    assert ids1 is ids2
+    assert client._http.get.call_count == 1
+
+
+# ── get_products / get_product_ids ────────────────────────────────────
+
+SAMPLE_PRODUCTS = [
+    {"id": 1, "name": "AlmaLinux", "is_community": False,
+     "platforms": [{"name": "AlmaLinux-8"}, {"name": "AlmaLinux-9"}]},
+    {"id": 613, "name": "epel-al", "is_community": True,
+     "platforms": [{"name": "AlmaLinux-10"}]},
+]
+
+
+@pytest.mark.asyncio
+async def test_get_products_plain_list(client):
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_PRODUCTS))
+    products = await client.get_products()
+    assert len(products) == 2
+    assert products[0]["name"] == "AlmaLinux"
+    client._http.get.assert_called_once_with(f"{ALBS_API}/products/")
+
+
+@pytest.mark.asyncio
+async def test_get_products_wrapped_form(client):
+    """A {'products': [...]} response is unwrapped to the inner list."""
+    client._http.get = AsyncMock(
+        return_value=_mock_response({"products": SAMPLE_PRODUCTS})
+    )
+    products = await client.get_products()
+    assert [p["name"] for p in products] == ["AlmaLinux", "epel-al"]
+
+
+@pytest.mark.asyncio
+async def test_get_product_ids_mapping_and_cache(client):
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_PRODUCTS))
+    ids1 = await client.get_product_ids()
+    ids2 = await client.get_product_ids()
+    assert ids1 == {"AlmaLinux": 1, "epel-al": 613}
+    assert ids1 is ids2
+    assert client._http.get.call_count == 1
+
+
+# ── get_release ───────────────────────────────────────────────────────
+
+SAMPLE_RELEASE = {
+    "id": 39229,
+    "status": 1,
+    "build_ids": [62316],
+    "build_task_ids": [1, 2, 3],
+    "plan": {
+        "packages": [
+            {"package": {"name": "openscap", "version": "1.3.14",
+                         "release": "1.el8", "arch": "src"}},
+            {"package": {"name": "openscap", "version": "1.3.14",
+                         "release": "1.el8", "arch": "x86_64"}},
+        ],
+        "repositories": [
+            {"id": 1, "name": "almalinux-8-appstream", "arch": "src"},
+        ],
+    },
+    "product": {"name": "AlmaLinux"},
+    "platform": {"name": "AlmaLinux-8"},
+    "created_at": "2026-06-17T13:04:24",
+}
+
+
+@pytest.mark.asyncio
+async def test_get_release(client):
+    client._http.get = AsyncMock(return_value=_mock_response(SAMPLE_RELEASE))
+    release = await client.get_release(39229)
+    assert release["id"] == 39229
+    assert release["status"] == 1
+    client._http.get.assert_called_once_with(f"{ALBS_API}/releases/39229/")
+
+
+# ── create_release ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_release_payload(client):
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 555, "status": 1, "plan": {}})
+    )
+    result = await client.create_release(
+        build_ids=[62316],
+        build_task_ids=[1, 2, 3],
+        platform_id=1,
+        product_id=4,
+    )
+    assert result["id"] == 555
+    args, kwargs = client._http.post.call_args
+    assert args[0] == f"{ALBS_API}/releases/new/"
+    payload = kwargs["json"]
+    assert payload == {
+        "builds": [62316],
+        "build_tasks": [1, 2, 3],
+        "platform_id": 1,
+        "product_id": 4,
+    }
+    assert kwargs["headers"] == {"authorization": "Bearer test-token-123"}
+
+
+@pytest.mark.asyncio
+async def test_create_release_no_token(client_no_token):
+    with pytest.raises(PermissionError):
+        await client_no_token.create_release(
+            build_ids=[1], build_task_ids=[1], platform_id=1, product_id=1
+        )
+
+
+# ── completed task helpers ────────────────────────────────────────────
+
+def test_get_completed_task_ids():
+    info = {
+        "tasks": [
+            {"id": 1, "status": 2, "ref": {"url": "u/a"}},
+            {"id": 2, "status": 3, "ref": {"url": "u/a"}},
+            {"id": 3, "status": 2, "ref": {"url": "u/b"}},
+        ]
+    }
+    assert get_completed_task_ids(info) == [1, 3]
+
+
+def test_get_completed_task_ids_empty():
+    assert get_completed_task_ids({"tasks": []}) == []
+
+
+def test_get_whole_package_task_ids_drops_partial():
+    """A package with any non-completed arch task is dropped entirely."""
+    info = {
+        "tasks": [
+            # pkg-a: both arch tasks completed → both kept
+            {"id": 1, "status": 2, "ref": {"url": "git/pkg-a.git"}},
+            {"id": 2, "status": 2, "ref": {"url": "git/pkg-a.git"}},
+            # pkg-b: one failed → whole package dropped
+            {"id": 3, "status": 2, "ref": {"url": "git/pkg-b.git"}},
+            {"id": 4, "status": 3, "ref": {"url": "git/pkg-b.git"}},
+        ]
+    }
+    assert sorted(get_whole_package_task_ids(info)) == [1, 2]
+
+
+def test_get_whole_package_task_ids_all_complete():
+    info = {
+        "tasks": [
+            {"id": 1, "status": 2, "ref": {"url": "git/pkg-a.git"}},
+            {"id": 2, "status": 2, "ref": {"url": "git/pkg-b.git"}},
+        ]
+    }
+    assert sorted(get_whole_package_task_ids(info)) == [1, 2]

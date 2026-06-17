@@ -76,10 +76,39 @@ signed with an EPEL key.
 6. To check whether signing finished, call get_sign_task_status(build_id) — \
 it shows each sign task's status (idle/in_progress/completed/failed).
 
+## Creating release plans (requires JWT token)
+This server can CREATE a release plan but NEVER performs the actual release \
+(it does not commit/publish). Creating a plan is safe: ALBS records a \
+"scheduled" release and computes which packages go to which repositories, \
+but nothing is published until the plan is committed — which this server \
+intentionally does not do.
+1. ASK the user for the build id, the target platform, and the target \
+product. Use get_products() to list products (id, name, official/community, \
+platforms) so the user can choose. Use get_platforms() for platform names.
+2. The build must have completed tasks — only completed build tasks go into \
+a plan. If the build failed entirely, there is nothing to release.
+3. Call create_release_plan(build_id, platform, product). It collects the \
+completed build tasks automatically, resolves the platform/product names to \
+ids, and creates the scheduled plan. Platform and product names are \
+validated against ALBS — unknown names return an error with the valid list.
+4. For a PARTIAL build that was superseded by a 'retry failed' build, pass \
+whole_packages_only=True so only packages whose every arch task completed \
+are included (half-built packages are dropped).
+5. Report the plan: status (scheduled), the source packages and target \
+repositories. Make clear to the user that NOTHING has been published — it \
+is only a plan.
+6. To view an existing plan later, call get_release_plan(release_id).
+7. If the user asks to actually release / commit / publish, call \
+commit_release — it is intentionally blocked and explains that only plans \
+are supported here.
+
 ## Important notes
 - Read-only tools work without authentication.
-- Build creation, signing, and sign key listing require a JWT token.
+- Build/release creation, signing, and sign key listing require a JWT token.
+- Product and release viewing (get_products, get_release_plan) are read-only.
 - Build deletion is intentionally blocked for safety.
+- Committing/performing a release is intentionally blocked — this server \
+only creates release plans, never the actual release.
 """,
 )
 
@@ -196,6 +225,28 @@ async def get_sign_task_status(build_id: int) -> str:
     and sign key ID. No authentication required.
     """
     return await cmd.get_sign_task_status(build_id)
+
+
+@mcp.tool()
+async def get_products() -> str:
+    """List all products on ALBS. No authentication required.
+
+    Returns each product's id, name, official/community flag, and the
+    platforms it covers. Use this to pick the target product when creating
+    a release plan with create_release_plan.
+    """
+    return await cmd.get_products()
+
+
+@mcp.tool()
+async def get_release_plan(release_id: int) -> str:
+    """View an existing release plan. No authentication required.
+
+    Returns the release status (scheduled/in_progress/completed/failed/
+    reverted), product, platform, the source packages it covers, and the
+    target repositories.
+    """
+    return await cmd.get_release_plan(release_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -338,6 +389,55 @@ async def sign_build(build_id: int, sign_key_id: int = 4) -> str:
 
 
 @mcp.tool()
+async def create_release_plan(
+    build_id: int,
+    platform: str,
+    product: str,
+    build_ids: list[int] | None = None,
+    whole_packages_only: bool = False,
+) -> str:
+    """Create a release PLAN on ALBS. Requires JWT token.
+
+    Creates a "scheduled" release and computes which packages go to which
+    repositories. It NEVER performs the actual release — nothing is
+    published. Committing the plan (the real release) is intentionally not
+    supported here.
+
+    The completed build tasks are collected automatically; the build must
+    have completed tasks. Platform and product names are validated against
+    ALBS — use get_platforms() and get_products() to see valid names.
+
+    Args:
+        build_id: The build to release.
+        platform: Target platform name (e.g. "AlmaLinux-9").
+        product: Target product name (e.g. "AlmaLinux", "epel-al").
+                 Use get_products() to list available products.
+        build_ids: Optional additional build ids to include in the same plan.
+        whole_packages_only: When True, include only packages whose every
+                             architecture task completed (drop half-built
+                             packages). Use for a PARTIAL build superseded by
+                             a 'retry failed' build. Default: False.
+    """
+    return await cmd.create_release_plan(
+        build_id=build_id,
+        platform=platform,
+        product=product,
+        build_ids=build_ids,
+        whole_packages_only=whole_packages_only,
+    )
+
+
+@mcp.tool()
+async def commit_release(release_id: int) -> str:
+    """Commit (perform) a release. CURRENTLY BLOCKED.
+
+    This server only creates release plans. Performing the actual release
+    (publishing packages) is intentionally disabled.
+    """
+    return await cmd.commit_release(release_id)
+
+
+@mcp.tool()
 async def delete_build(build_id: int) -> str:
     """Delete a build. CURRENTLY BLOCKED.
 
@@ -375,6 +475,35 @@ def investigate_build(build_id: str) -> str:
         "the end with read_log_tail (it auto-downloads) before using "
         "read_log_range. Never read a large mock_build log from line 1.\n"
         "4. Report the root cause of the failure, citing the log evidence."
+    )
+
+
+@mcp.prompt(
+    title="Create an ALBS release plan",
+    description="Seed the release-plan workflow for a build ID (never releases).",
+)
+def release_plan(build_id: str) -> str:
+    """User-invoked entry point for the release-plan workflow.
+
+    Thin wrapper: it parameterizes the release-plan workflow that already
+    lives in the server instructions by build_id. The detailed rationale
+    (only completed tasks, never commit/publish) stays in the instructions
+    and is not duplicated here.
+    """
+    return (
+        f"Create a release plan for ALBS build {build_id}. Do NOT perform "
+        "the actual release — only create the plan.\n\n"
+        "Follow the release-plan workflow from the albs-mcp server "
+        "instructions:\n"
+        f"1. Call get_build_info({build_id}) to confirm the platform and "
+        "that the build has completed tasks.\n"
+        "2. Call get_products() and ask me which product to release to "
+        "(and confirm the platform).\n"
+        f"3. Call create_release_plan({build_id}, platform, product) to "
+        "create the scheduled plan.\n"
+        "4. Report the plan (status, source packages, target repositories) "
+        "and make clear that nothing has been published — it is only a plan. "
+        "Never call commit_release."
     )
 
 

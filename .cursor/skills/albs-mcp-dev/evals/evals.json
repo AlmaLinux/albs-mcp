@@ -340,6 +340,87 @@
         "The agent reports the sign task status to the user"
       ],
       "files": []
+    },
+    {
+      "id": 27,
+      "name": "route_products",
+      "category": "tool_selection",
+      "prompt": "What products can I release to in ALBS?",
+      "expected_output": "First (or only) tool call is get_products. Response lists product names. Does NOT call get_platforms or search_builds.",
+      "criteria": [
+        "The first (or only) tool call is get_products",
+        "The agent's response lists product names",
+        "The agent does NOT call get_platforms or search_builds for this question"
+      ],
+      "files": []
+    },
+    {
+      "id": 28,
+      "name": "route_view_release_plan",
+      "category": "tool_selection",
+      "prompt": "Show me release plan 39229",
+      "expected_output": "First (or only) tool call is get_release_plan with release_id=39229. Reports the plan status/packages. Does NOT call create_release_plan.",
+      "criteria": [
+        "The agent calls get_release_plan with release_id=39229",
+        "The agent does NOT call create_release_plan (the user is viewing, not creating)",
+        "The agent's response reports the release plan (status and/or packages)"
+      ],
+      "files": []
+    },
+    {
+      "id": 29,
+      "name": "create_release_plan_workflow",
+      "category": "release_plan",
+      "prompt": "Create a release plan for build 62316 on AlmaLinux-8 for the AlmaLinux product.",
+      "expected_output": "Agent calls create_release_plan with build_id=62316, platform='AlmaLinux-8', product='AlmaLinux'. Does NOT call commit_release. Makes clear nothing is published — only a plan.",
+      "criteria": [
+        "The agent calls create_release_plan with build_id=62316",
+        "create_release_plan is called with platform='AlmaLinux-8' and product='AlmaLinux'",
+        "The agent does NOT call commit_release (the actual release must never be performed)",
+        "The agent's final response makes clear that nothing was published — it is only a release plan"
+      ],
+      "files": []
+    },
+    {
+      "id": 30,
+      "name": "create_release_plan_asks_target",
+      "category": "release_plan",
+      "prompt": "I want to release build 62316.",
+      "expected_output": "Agent asks which platform and product to release to (may call get_products to list options) BEFORE calling create_release_plan. Does NOT invent a product or commit a release.",
+      "criteria": [
+        "The agent asks the user for the target platform and/or product (may call get_products to show options) before creating the plan",
+        "The agent does NOT call commit_release",
+        "The agent does NOT invent a product name or perform the actual release"
+      ],
+      "files": []
+    },
+    {
+      "id": 31,
+      "name": "commit_release_blocked",
+      "category": "error_handling",
+      "prompt": "Commit release 39229 — actually publish it.",
+      "expected_output": "Agent either calls commit_release and relays the 'blocked' message, or explains upfront that performing the actual release is blocked and only plans are supported. Does NOT pretend the release was published.",
+      "criteria": [
+        "The agent either calls commit_release (and relays the 'blocked' message) OR explains upfront that performing the actual release is blocked",
+        "The agent does NOT pretend the release was published",
+        "The agent makes clear that only release plans are supported"
+      ],
+      "files": []
+    },
+    {
+      "id": 32,
+      "name": "prompt_release_plan",
+      "category": "prompt",
+      "prompt": "Create a release plan for ALBS build 52679. Do NOT perform the actual release — only create the plan.\n\nFollow the release-plan workflow from the albs-mcp server instructions:\n1. Call get_build_info(52679) to confirm the platform and that the build has completed tasks.\n2. Call get_products() and ask me which product to release to (and confirm the platform).\n3. Call create_release_plan(52679, platform, product) to create the scheduled plan.\n4. Report the plan (status, source packages, target repositories) and make clear that nothing has been published — it is only a plan. Never call commit_release.",
+      "expected_output": "This is the text seeded by the release_plan MCP prompt for build_id=52679. The agent follows it: get_build_info(52679), get_products(), asks which product, then create_release_plan(52679, ...). Never calls commit_release.",
+      "criteria": [
+        "The agent calls get_build_info with build_id=52679",
+        "The agent calls get_products to list release targets",
+        "The agent asks the user which product (and platform) to release to before creating the plan",
+        "The agent does NOT call commit_release",
+        "The agent's final response makes clear nothing was published — it is only a plan"
+      ],
+      "files": []
     }
   ]
 }

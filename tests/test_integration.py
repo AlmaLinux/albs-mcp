@@ -14,6 +14,8 @@ import pytest_asyncio
 from albs_mcp.client import ALBSClient
 
 BUILD_ID = 52745
+# A long-since completed release — safe to read.
+RELEASE_ID = 39229
 
 
 @pytest_asyncio.fixture
@@ -212,3 +214,51 @@ async def test_read_not_downloaded_raises(client):
 async def test_read_range_not_downloaded_raises(client):
     with pytest.raises(FileNotFoundError, match="not downloaded"):
         client.read_log_range(BUILD_ID, "nonexistent.log", 1, 10)
+
+
+# ── Products (public) ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_products_returns_data(client):
+    products = await client.get_products()
+    assert isinstance(products, list)
+    assert len(products) > 0
+    for p in products:
+        assert "id" in p
+        assert "name" in p
+    names = [p["name"] for p in products]
+    assert "AlmaLinux" in names
+
+
+@pytest.mark.asyncio
+async def test_get_product_ids_mapping(client):
+    ids = await client.get_product_ids()
+    assert isinstance(ids, dict)
+    assert "AlmaLinux" in ids
+    assert isinstance(ids["AlmaLinux"], int)
+
+
+@pytest.mark.asyncio
+async def test_get_platform_ids_mapping(client):
+    ids = await client.get_platform_ids()
+    assert isinstance(ids, dict)
+    assert "AlmaLinux-9" in ids
+    assert isinstance(ids["AlmaLinux-9"], int)
+
+
+# ── Releases (public) ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_release_returns_structure(client):
+    release = await client.get_release(RELEASE_ID)
+    assert release["id"] == RELEASE_ID
+    assert "status" in release
+    assert "plan" in release
+    assert "build_ids" in release
+    assert "build_task_ids" in release
+
+
+@pytest.mark.asyncio
+async def test_get_release_nonexistent(client):
+    with pytest.raises(Exception):
+        await client.get_release(999999999)

@@ -180,7 +180,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | Tool | Description |
 |---|---|
 | `get_platforms` | All platforms and their architectures, fetched dynamically from ALBS |
-| `get_build_info` | Build summary: every task with status, arch, package, git ref, log count |
+| `get_build_info` | Build summary: every task with status, arch, package, git ref, log count, plus flavors and any linked builds |
 | `get_failed_tasks` | Only failed tasks with their log files listed; key logs marked with ★ |
 | `list_build_logs` | All log/config files available for a build on the server |
 | `download_log` | Download a log file to local disk (`/tmp/albs-logs/<build_id>/`) |

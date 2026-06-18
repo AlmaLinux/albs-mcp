@@ -241,6 +241,23 @@ async def test_get_build_info_shows_flavors(mock_client):
     assert "EPEL-10_altarch" in result
 
 
+@pytest.mark.asyncio
+async def test_get_build_info_shows_linked_builds(mock_client):
+    build_with_linked = {
+        **SAMPLE_BUILD,
+        "linked_builds": [61886, 62250],
+    }
+    mock_client.get_build = AsyncMock(return_value=build_with_linked)
+    result = await get_build_info(50000)
+    assert "Linked builds: 61886, 62250" in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_no_linked_builds(mock_client):
+    result = await get_build_info(50000)
+    assert "Linked builds:" not in result
+
+
 # ── get_failed_tasks ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

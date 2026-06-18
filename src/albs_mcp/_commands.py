@@ -143,6 +143,7 @@ async def get_build_info(build_id: int) -> str:
     }
     arches = sorted({t["arch"] for t in build["tasks"]})
     flavors = [f["name"] for f in build.get("platform_flavors", [])]
+    linked_builds = build.get("linked_builds", [])
 
     lines = [
         f"Build #{build['id']}",
@@ -155,6 +156,8 @@ async def get_build_info(build_id: int) -> str:
     ]
     if flavors:
         lines.append(f"Flavors: {', '.join(flavors)}")
+    if linked_builds:
+        lines.append(f"Linked builds: {', '.join(str(b) for b in linked_builds)}")
 
     lines.append("")
     lines.append("Tasks:")

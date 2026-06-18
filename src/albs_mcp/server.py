@@ -133,7 +133,9 @@ async def get_build_info(build_id: int) -> str:
     """Get build details: tasks, statuses, packages, architectures.
 
     Returns a summary of the build including each task's status,
-    architecture, package name, and whether it has sign tasks.
+    architecture, package name, and whether it has sign tasks. Also lists
+    any linked builds (their -br repos are mixed into the buildroot), which
+    is needed to accurately reproduce a similar rebuild.
     """
     return await cmd.get_build_info(build_id)
 

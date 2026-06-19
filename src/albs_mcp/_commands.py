@@ -145,6 +145,19 @@ async def get_build_info(build_id: int) -> str:
     flavors = [f["name"] for f in build.get("platform_flavors", [])]
     linked_builds = build.get("linked_builds", [])
 
+    # Secure Boot is a build-level flag, but ALBS reports it per task
+    # (is_secure_boot). It is normally uniform across all tasks; surface the
+    # mixed case honestly rather than picking one value.
+    sb_arches = sorted(
+        {t["arch"] for t in build["tasks"] if t.get("is_secure_boot")}
+    )
+    if not sb_arches:
+        secure_boot = "disabled"
+    elif len(sb_arches) == len(arches):
+        secure_boot = "enabled"
+    else:
+        secure_boot = f"enabled ({', '.join(sb_arches)})"
+
     lines = [
         f"Build #{build['id']}",
         f"Created: {build['created_at']}",
@@ -152,6 +165,7 @@ async def get_build_info(build_id: int) -> str:
         f"Owner: {build['owner']['username']}",
         f"Platform: {', '.join(sorted(platforms)) or 'N/A'}",
         f"Architectures: {', '.join(arches)}",
+        f"Secure Boot: {secure_boot}",
         f"Released: {build['released']}",
     ]
     if flavors:

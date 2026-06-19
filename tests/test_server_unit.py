@@ -258,6 +258,38 @@ async def test_get_build_info_no_linked_builds(mock_client):
     assert "Linked builds:" not in result
 
 
+@pytest.mark.asyncio
+async def test_get_build_info_secure_boot_disabled(mock_client):
+    # SAMPLE_BUILD tasks have no is_secure_boot field → disabled.
+    result = await get_build_info(50000)
+    assert "Secure Boot: disabled" in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_secure_boot_enabled(mock_client):
+    sb_build = {
+        **SAMPLE_BUILD,
+        "tasks": [
+            {**t, "is_secure_boot": True} for t in SAMPLE_BUILD["tasks"]
+        ],
+    }
+    mock_client.get_build = AsyncMock(return_value=sb_build)
+    result = await get_build_info(50000)
+    assert "Secure Boot: enabled" in result
+    # Uniform across all tasks → no per-arch qualifier.
+    assert "Secure Boot: enabled\n" in result + "\n"
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_secure_boot_mixed(mock_client):
+    tasks = [dict(t) for t in SAMPLE_BUILD["tasks"]]
+    tasks[0]["is_secure_boot"] = True  # x86_64 only
+    mixed_build = {**SAMPLE_BUILD, "tasks": tasks}
+    mock_client.get_build = AsyncMock(return_value=mixed_build)
+    result = await get_build_info(50000)
+    assert "Secure Boot: enabled (x86_64)" in result
+
+
 # ── get_failed_tasks ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

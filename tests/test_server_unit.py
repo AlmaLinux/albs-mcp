@@ -290,6 +290,73 @@ async def test_get_build_info_secure_boot_mixed(mock_client):
     assert "Secure Boot: enabled (x86_64)" in result
 
 
+@pytest.mark.asyncio
+async def test_get_build_info_shows_global_mock_options(mock_client):
+    build = {
+        **SAMPLE_BUILD,
+        "mock_options": {"definitions": {"test": "1"}},
+    }
+    mock_client.get_build = AsyncMock(return_value=build)
+    result = await get_build_info(50000)
+    assert "Global Mock Options: definitions: test=1" in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_no_global_mock_options(mock_client):
+    # SAMPLE_BUILD has mock_options=None → no line at all.
+    result = await get_build_info(50000)
+    assert "Global Mock Options:" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_shows_project_mock_options_uniform(mock_client):
+    tasks = [
+        {**t, "mock_options": {"definitions": {"test222": "22"}}}
+        for t in SAMPLE_BUILD["tasks"]
+    ]
+    build = {**SAMPLE_BUILD, "tasks": tasks}
+    mock_client.get_build = AsyncMock(return_value=build)
+    result = await get_build_info(50000)
+    # Uniform across all tasks → single build-level line, no per-task noise.
+    assert "Project Mock Options: definitions: test222=22" in result
+    assert "mock=[" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_project_mock_options_per_task_when_mixed(mock_client):
+    tasks = [dict(t) for t in SAMPLE_BUILD["tasks"]]
+    tasks[0]["mock_options"] = {"definitions": {"a": "1"}}
+    tasks[1]["mock_options"] = {"definitions": {"b": "2"}}
+    # tasks[2] has no mock options at all.
+    build = {**SAMPLE_BUILD, "tasks": tasks}
+    mock_client.get_build = AsyncMock(return_value=build)
+    result = await get_build_info(50000)
+    # Not uniform → annotate per task, no consolidated build-level line.
+    assert "Project Mock Options:" not in result
+    assert "mock=[definitions: a=1]" in result
+    assert "mock=[definitions: b=2]" in result
+
+
+@pytest.mark.asyncio
+async def test_get_build_info_mock_options_formats_lists(mock_client):
+    build = {
+        **SAMPLE_BUILD,
+        "mock_options": {
+            "definitions": {"dist": ".el9"},
+            "yum_exclude": ["foo", "bar"],
+            "with": ["python3"],
+            "module_enable": [],
+        },
+    }
+    mock_client.get_build = AsyncMock(return_value=build)
+    result = await get_build_info(50000)
+    assert "definitions: dist=.el9" in result
+    assert "yum_exclude: foo, bar" in result
+    assert "with: python3" in result
+    # Empty values are dropped, not shown as "module_enable: ".
+    assert "module_enable" not in result
+
+
 # ── get_failed_tasks ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

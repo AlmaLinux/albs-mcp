@@ -130,6 +130,29 @@ async def get_platforms() -> str:
     return "\n".join(lines)
 
 
+def _format_mock_options(opts: dict | None) -> str:
+    """Render an ALBS mock_options dict as a compact one-line summary.
+
+    Handles the keys ALBS uses (definitions, yum_exclude, with, without,
+    module_enable, …) generically so nothing is silently hidden. Returns ""
+    when there is nothing meaningful to show, letting callers skip the line.
+    """
+    if not opts:
+        return ""
+    parts: list[str] = []
+    for key, value in opts.items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            rendered = ", ".join(f"{k}={v}" for k, v in value.items())
+        elif isinstance(value, (list, tuple)):
+            rendered = ", ".join(str(v) for v in value)
+        else:
+            rendered = str(value)
+        parts.append(f"{key}: {rendered}")
+    return "; ".join(parts)
+
+
 async def get_build_info(build_id: int) -> str:
     client = _get_client()
     try:
@@ -173,6 +196,24 @@ async def get_build_info(build_id: int) -> str:
     if linked_builds:
         lines.append(f"Linked builds: {', '.join(str(b) for b in linked_builds)}")
 
+    global_mock = _format_mock_options(build.get("mock_options"))
+    if global_mock:
+        lines.append(f"Global Mock Options: {global_mock}")
+
+    # Project (per-task) mock options. ALBS stores these per task, but they are
+    # normally set once for the project and so are uniform across tasks. Show a
+    # single build-level line when uniform; fall back to per-task annotation
+    # when they differ (mirrors how Secure Boot is reported honestly).
+    task_mocks = {
+        t["id"]: _format_mock_options(t.get("mock_options"))
+        for t in build["tasks"]
+    }
+    distinct_task_mocks = {m for m in task_mocks.values() if m}
+    uniform_task_mock = ""
+    if len(distinct_task_mocks) == 1 and all(task_mocks.values()):
+        uniform_task_mock = next(iter(distinct_task_mocks))
+        lines.append(f"Project Mock Options: {uniform_task_mock}")
+
     lines.append("")
     lines.append("Tasks:")
 
@@ -181,9 +222,13 @@ async def get_build_info(build_id: int) -> str:
         pkg = t["ref"]["url"].split("/")[-1].replace(".git", "")
         git_ref = t["ref"].get("git_ref", "N/A")
         log_count = sum(1 for a in t["artifacts"] if a["type"] == "build_log")
+        # Only annotate per-task mock options when they are NOT uniform across
+        # the build — otherwise the single build-level line above covers them.
+        mock = "" if uniform_task_mock else task_mocks[t["id"]]
+        mock_str = f"  mock=[{mock}]" if mock else ""
         lines.append(
             f"  [{status:>9}] task_id={t['id']}  arch={t['arch']:>10}  "
-            f"pkg={pkg}  ref={git_ref}  logs={log_count}"
+            f"pkg={pkg}  ref={git_ref}  logs={log_count}{mock_str}"
         )
 
     if build["sign_tasks"]:

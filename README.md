@@ -17,11 +17,11 @@ Two ways to use:
 
 ### Without a token (read-only)
 
-- **Investigate build failures** — the main use case. Give the agent a build ID and it will walk through the logs (mock_root → mock_stderr → mock_build), reading from the end to find the error without wasting tokens on 100k+ line log files.
+- **Investigate build failures** — the main use case. Give the agent a build ID and it greps the logs for the failure signatures (`search_log`), pinning the exact file, line, and diagnostic, then widens the context around it. No guessing at line offsets and no burning tokens on 100k+ line log files.
 - **Get build details** — statuses of all tasks, packages, architectures, sign tasks.
 - **List and search builds** — browse recent builds, filter by package name or status.
 - **Get platforms** — dynamically fetched list of all platforms and their supported architectures.
-- **Download and read logs** — any log file from any build, with smart pagination (tail first, then range). Reading auto-downloads the log if it isn't on disk yet.
+- **Download and read logs** — any log file from any build: grep it (`search_log`), page it bottom-up (`read_log_tail`), or read a line range. No read can blow up: each line is clipped to 500 chars and the whole result to 40k chars (`max_line_chars=0` / `max_chars=0` to lift), so a log whose single lines run to several KB of compiler flags comes back in pages that join up exactly instead of one oversized blob. Reading auto-downloads the log if it isn't on disk yet.
 - **Check sign status** — see whether sign tasks for a build completed or failed.
 - **List products** — all release targets (products) with their platforms, official/community flag, and IDs.
 - **View release plans** — status, source packages, and target repositories of any existing release.
@@ -42,7 +42,7 @@ ALBS produces several log files per build task. The key ones for debugging:
 |---|---|
 | `mock_root` | Chroot setup, dependency resolution. Check first — if deps failed, nothing else matters. |
 | `mock_stderr` | Stderr output from the build process. Often has the clearest error message. |
-| `mock_build` | Full build log (can be 100k+ lines). Contains the complete rpmbuild output. Check last. |
+| `mock_build` | Full build log (can be 100k+ lines). The complete rpmbuild output — where compile errors live. Grep it with `search_log`; its tail shows only the `make` wrapper error, not the cause. |
 | `mock_state` | Mock state transitions. |
 | `mock_hw_info` | Hardware info of the build node. |
 | `mock_installed_pkgs` | List of packages installed in the chroot. |
@@ -124,8 +124,15 @@ albs platforms
 # Investigate a build
 albs build-info 52679
 albs failed-tasks 52679
-# log-tail auto-downloads the log if needed (download-log is optional)
-albs log-tail 52679 "mock_build.395391.1772974729.log" -n 200
+# log-search greps for the failure and shows it with context — start here.
+# It auto-downloads the log if needed (download-log is optional)
+albs log-search 52679 "mock_build.395391.1772974729.log"
+# ...or grep for something specific
+albs log-search 52679 "mock_build.395391.1772974729.log" -e "Hunk #\d+ FAILED" -A 3
+# When the search finds nothing, page the log bottom-up: each page prints the
+# exact command for the page above it, so the pages join up with no gaps
+albs log-tail 52679 "mock_build.395391.1772974729.log"
+albs log-tail 52679 "mock_build.395391.1772974729.log" --before-line 772
 
 # Search builds
 albs search --project bash --page 2
@@ -184,8 +191,9 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `get_failed_tasks` | Only failed tasks with their log files listed; key logs marked with ★ |
 | `list_build_logs` | All log/config files available for a build on the server |
 | `download_log` | Download a log file to local disk (`/tmp/albs-logs/<build_id>/`) |
-| `read_log_tail` | Read last N lines of a log (default 3000 — errors are at the end); auto-downloads if needed |
-| `read_log_range` | Read a specific line range from a log; auto-downloads if needed |
+| `search_log` | **Start here on a failure**: grep a log for the build-failure signatures (or your own regex) and get every hit with line numbers and context; auto-downloads if needed |
+| `read_log_tail` | Read a page of a log from the end, and page upward from there (`before_line`); each result prints the exact call for the page above it. Shows how the build terminated, not where the compile error is |
+| `read_log_range` | Read a specific line range from a log (e.g. around a `search_log` hit); stops at the size budget and tells you how to continue |
 | `search_builds` | Browse builds by page, filter by package name or running status |
 | `get_sign_task_status` | Status of a build's sign tasks (idle/in_progress/completed/failed) — use after `sign_build` |
 | `get_products` | List all products (release targets): ID, name, official/community, platforms |
@@ -226,18 +234,33 @@ Ask the agent: *"What went wrong in build 52679?"*
 
 The agent will:
 
-1. **`get_build_info(52679)`** — sees 2 tasks: src completed, x86_64 failed
-2. **`get_failed_tasks(52679)`** — gets 14 log files, ★ marks the important ones
-3. **`download_log(52679, "mock_root.395391.1772974729.log")`** — downloads root log
-4. **`read_log_tail(52679, "mock_root.395391.1772974729.log")`** — checks chroot setup: all clean
-5. **`download_log(52679, "mock_stderr.395391.1772974729.log")`** — downloads stderr
-6. **`read_log_tail(52679, "mock_stderr.395391.1772974729.log")`** — sees rpmbuild command
-7. **`download_log(52679, "mock_build.395391.1772974729.log")`** — downloads full build log (236KB)
-8. **`read_log_tail(52679, "mock_build.395391.1772974729.log", 200)`** — finds the error:
+1. **`get_build_info(70368)`** — sees that only the i686 task failed; the other 7 arches built
+2. **`get_failed_tasks(70368)`** — gets the log files, ★ marks the important ones
+3. **`search_log(70368, "mock_build.441500.1785274367.log")`** — greps the 936-line / 600 KB
+   log and returns the cause with context, in one call:
    ```
-   gmake[1]: *** [libtransmission/CMakeFiles/transmission.dir/all] Error 2
+   >>> 826 | usr/lib/common/mech_openssl.c:2766:52: error: passing argument 5 of
+             'EVP_PKEY_get_octet_string_param' from incompatible pointer type
+       833 | note: expected 'size_t *' {aka 'unsigned int *'} but argument is of
+             type 'CK_ULONG *' {aka 'long unsigned int *'}
+   >>> 853 | make[1]: *** [Makefile:9851: ...mech_openssl.lo] Error 1
    ```
-9. Reports: *"Build failed due to a compilation error in libtransmission."*
+4. **`search_log(70368, "mock_root.441500.1785274367.log")`** — no matches: the chroot and
+   dependencies were fine, so this is not a dependency failure
+5. Reports: *"`CK_ULONG *` is `unsigned long *` while OpenSSL wants `size_t *`; on ILP32
+   (i686) those are different types, so the 3.27.0 rebase only breaks on 32-bit."*
+
+Had the search come up empty, the next move is `read_log_tail` and then the
+`↑ earlier: ...` call it prints, walking the log upward a page at a time. Pages are
+sized by the character budget, not a line count — 165 lines of this `mock_build`, or
+350 of the same build's `mock_root` — and each one starts exactly where the previous
+stopped, so nothing is skipped.
+
+Note what step 3 replaces. `read_log_tail` on that log returns
+`make: *** [Makefile:4615: all] Error 2` — the symptom, hundreds of lines below the real
+error, because `make -j` keeps compiling after the first failure. Asking for enough tail to
+reach the error instead returns 167 KB of gcc command lines and can exceed the caller's
+result-size limit. `search_log` returns 4 KB with the answer at the top.
 
 ## Example: creating a build
 
@@ -278,10 +301,10 @@ The agent will:
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network)
+# Unit tests (no network, 260 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
-# Integration tests (hits real ALBS API, read-only, 26 tests)
+# Integration tests (hits real ALBS API, read-only, 30 tests)
 pytest tests/test_integration.py -v
 
 # All tests

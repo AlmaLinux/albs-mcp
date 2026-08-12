@@ -9,6 +9,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from albs_mcp.cli import build_parser, _init
+from albs_mcp.constants import (
+    LOG_MAX_LINE_CHARS,
+    LOG_MAX_RESULT_CHARS,
+    LOG_SEARCH_AFTER,
+    LOG_SEARCH_BEFORE,
+    LOG_SEARCH_MAX_MATCHES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +146,9 @@ def test_log_tail_default():
         mock.return_value = "=== mock.log | lines 1-100 of 100 ==="
         code, out = _invoke(["log-tail", "50000", "mock.log"])
     assert code == 0
-    mock.assert_awaited_once_with(50000, "mock.log", 3000)
+    mock.assert_awaited_once_with(
+        50000, "mock.log", 3000, LOG_MAX_LINE_CHARS, None, LOG_MAX_RESULT_CHARS,
+    )
 
 
 def test_log_tail_custom_lines():
@@ -147,7 +156,33 @@ def test_log_tail_custom_lines():
         mock.return_value = "tail output"
         code, out = _invoke(["log-tail", "50000", "mock.log", "-n", "500"])
     assert code == 0
-    mock.assert_awaited_once_with(50000, "mock.log", 500)
+    mock.assert_awaited_once_with(
+        50000, "mock.log", 500, LOG_MAX_LINE_CHARS, None, LOG_MAX_RESULT_CHARS,
+    )
+
+
+def test_log_tail_pages_upward():
+    with patch("albs_mcp._commands.read_log_tail", new_callable=AsyncMock) as mock:
+        mock.return_value = "page 2"
+        code, out = _invoke([
+            "log-tail", "50000", "mock.log", "--before-line", "772",
+        ])
+    assert code == 0
+    mock.assert_awaited_once_with(
+        50000, "mock.log", 3000, LOG_MAX_LINE_CHARS, 772, LOG_MAX_RESULT_CHARS,
+    )
+
+
+def test_log_tail_budget_can_be_lifted():
+    with patch("albs_mcp._commands.read_log_tail", new_callable=AsyncMock) as mock:
+        mock.return_value = "everything"
+        code, out = _invoke([
+            "log-tail", "50000", "mock.log", "--max-chars", "0",
+        ])
+    assert code == 0
+    mock.assert_awaited_once_with(
+        50000, "mock.log", 3000, LOG_MAX_LINE_CHARS, None, 0,
+    )
 
 
 # ── log-range ─────────────────────────────────────────────────────────
@@ -158,7 +193,39 @@ def test_log_range():
         mock.return_value = "=== mock.log | lines 50-100 of 5000 ==="
         code, out = _invoke(["log-range", "50000", "mock.log", "50", "100"])
     assert code == 0
-    mock.assert_awaited_once_with(50000, "mock.log", 50, 100)
+    mock.assert_awaited_once_with(
+        50000, "mock.log", 50, 100, LOG_MAX_LINE_CHARS, LOG_MAX_RESULT_CHARS,
+    )
+
+
+# ── log-search ────────────────────────────────────────────────────────
+
+
+def test_log_search_defaults():
+    with patch("albs_mcp._commands.search_log", new_callable=AsyncMock) as mock:
+        mock.return_value = ">>> 826 | foo.c:1:1: error: boom"
+        code, out = _invoke(["log-search", "50000", "mock_build.log"])
+    assert code == 0
+    mock.assert_awaited_once_with(
+        50000, "mock_build.log", None,
+        LOG_SEARCH_BEFORE, LOG_SEARCH_AFTER, LOG_SEARCH_MAX_MATCHES,
+        LOG_MAX_LINE_CHARS, LOG_MAX_RESULT_CHARS,
+    )
+
+
+def test_log_search_custom_pattern_and_context():
+    with patch("albs_mcp._commands.search_log", new_callable=AsyncMock) as mock:
+        mock.return_value = "search output"
+        code, out = _invoke([
+            "log-search", "50000", "mock_build.log",
+            "-e", "Hunk #1 FAILED", "-B", "5", "-A", "0",
+            "-m", "1", "--max-line-chars", "0",
+        ])
+    assert code == 0
+    mock.assert_awaited_once_with(
+        50000, "mock_build.log", "Hunk #1 FAILED", 5, 0, 1, 0,
+        LOG_MAX_RESULT_CHARS,
+    )
 
 
 # ── search ────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 
 from albs_mcp.client import ALBSClient
+from albs_mcp.constants import LOG_ERROR_PATTERN, LOG_MAX_RESULT_CHARS
 
 BUILD_ID = 52745
 # A long-since completed release — safe to read.
@@ -178,9 +179,9 @@ async def test_download_and_read_tail(client):
     logs = await client.list_build_logs(BUILD_ID)
     albs_log = next(l for l in logs if l.startswith("albs."))
     await client.download_log(BUILD_ID, albs_log)
-    content, total, from_line = client.read_log_tail(BUILD_ID, albs_log, 5)
+    content, total, first, last = client.read_log_tail(BUILD_ID, albs_log, 5)
     assert total > 0
-    assert from_line >= 1
+    assert 1 <= first <= last == total
     assert len(content) > 0
 
 
@@ -189,8 +190,9 @@ async def test_download_and_read_range(client):
     logs = await client.list_build_logs(BUILD_ID)
     albs_log = next(l for l in logs if l.startswith("albs."))
     await client.download_log(BUILD_ID, albs_log)
-    content, total = client.read_log_range(BUILD_ID, albs_log, 1, 3)
+    content, total, last = client.read_log_range(BUILD_ID, albs_log, 1, 3)
     assert total > 0
+    assert last == min(3, total)
     assert len(content) > 0
 
 
@@ -214,6 +216,74 @@ async def test_read_not_downloaded_raises(client):
 async def test_read_range_not_downloaded_raises(client):
     with pytest.raises(FileNotFoundError, match="not downloaded"):
         client.read_log_range(BUILD_ID, "nonexistent.log", 1, 10)
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_pages_a_real_log_bottom_up(client):
+    """Paging the i686 mock_build log covers it with no gap and no overlap.
+
+    Page sizes come from the char budget, so on this log (multi-KB gcc lines)
+    a page is ~165 lines while a mock_root page is ~350 — the point of budgeting
+    in characters rather than lines.
+    """
+    build_id, log = 70368, "mock_build.441500.1785274367.log"
+    await client.download_log(build_id, log)
+    seen: list[int] = []
+    before = None
+    for _ in range(20):
+        content, total, first, last = client.read_log_tail(
+            build_id, log, 3000, before_line=before,
+        )
+        if not content:
+            break
+        assert len(content) <= LOG_MAX_RESULT_CHARS
+        seen = list(range(first, last + 1)) + seen
+        before = first
+        if first == 1:
+            break
+    assert seen == list(range(1, total + 1))
+    assert total > 900
+
+
+@pytest.mark.asyncio
+async def test_search_log_finds_the_real_compile_error(client):
+    """The i686 task of build 70368 fails on a 32-bit-only pointer mismatch.
+
+    The log's tail only shows `make: *** [Makefile:4615: all] Error 2`; the real
+    diagnostic sits ~100 lines earlier among multi-KB gcc command lines. This
+    asserts search_log surfaces it, since that is the whole point of the tool.
+    """
+    build_id, log = 70368, "mock_build.441500.1785274367.log"
+    await client.download_log(build_id, log)
+    hunks, matches, total, _ = client.search_log(
+        build_id, log, LOG_ERROR_PATTERN, before=1, after=8,
+    )
+    assert matches >= 3
+    assert total > 900
+    text = "\n".join(line for hunk in hunks for _, line, _ in hunk)
+    assert "mech_openssl.c:2766" in text
+    assert "incompatible pointer type" in text
+    # Every reported line stays within the clip budget (plus the marker).
+    assert max(len(line) for hunk in hunks for _, line, _ in hunk) < 600
+
+
+@pytest.mark.asyncio
+async def test_search_log_no_matches_on_a_clean_log(client):
+    """A log with no failure signature reports zero matches, not a false hit."""
+    logs = await client.list_build_logs(BUILD_ID)
+    albs_log = next(l for l in logs if l.startswith("albs."))
+    await client.download_log(BUILD_ID, albs_log)
+    _hunks, matches, total, _ = client.search_log(
+        BUILD_ID, albs_log, r"this-string-appears-in-no-log",
+    )
+    assert matches == 0
+    assert total > 0
+
+
+@pytest.mark.asyncio
+async def test_search_log_not_downloaded_raises(client):
+    with pytest.raises(FileNotFoundError, match="not downloaded"):
+        client.search_log(BUILD_ID, "nonexistent.log", "error")
 
 
 # ── Products (public) ─────────────────────────────────────────────────

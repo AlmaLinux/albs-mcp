@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -9,6 +10,11 @@ import httpx
 import pytest
 
 import albs_mcp._commands as commands_module
+from albs_mcp.constants import (
+    LOG_ERROR_PATTERN,
+    LOG_MAX_LINE_CHARS,
+    LOG_MAX_RESULT_CHARS,
+)
 from albs_mcp.server import (
     mcp,
     get_build_info,
@@ -20,6 +26,7 @@ from albs_mcp.server import (
     download_log,
     read_log_tail,
     read_log_range,
+    search_log,
     search_builds,
     create_build,
     sign_build,
@@ -134,8 +141,19 @@ def mock_client():
         "current_page": 1,
     })
     client.download_log = AsyncMock(return_value=Path("/tmp/test/mock_build.log"))
-    client.read_log_tail = MagicMock(return_value=("error: fail", 5000, 4990))
-    client.read_log_range = MagicMock(return_value=("line 100\nline 101", 5000))
+    client.read_log_tail = MagicMock(
+        return_value=("error: fail", 5000, 4990, 5000)
+    )
+    client.read_log_range = MagicMock(
+        return_value=("line 100\nline 101", 5000, 102)
+    )
+    client.search_log = MagicMock(return_value=(
+        [[
+            (826, "foo.c: In function 'bar':", False),
+            (827, "foo.c:12:5: error: boom", True),
+        ]],
+        1, 936, 3,
+    ))
     client.create_build = AsyncMock(return_value={"id": 99999, "created_at": "2026-03-10T00:00:00"})
     client.sign_build = AsyncMock(return_value={"id": 888, "status": 1})
     client.get_platform_ids = AsyncMock(return_value={
@@ -425,14 +443,17 @@ async def test_download_log_tool(mock_client, tmp_path):
 @pytest.mark.asyncio
 async def test_read_log_tail_tool(mock_client):
     result = await read_log_tail(50000, "mock_build.log", 3000)
-    assert "lines 4990-5000 of 5000" in result
+    assert "lines 4990-5000 of 5,000" in result
     assert "error: fail" in result
 
 
 @pytest.mark.asyncio
 async def test_read_log_tail_default_lines(mock_client):
     await read_log_tail(50000, "mock_build.log")
-    mock_client.read_log_tail.assert_called_once_with(50000, "mock_build.log", 3000)
+    mock_client.read_log_tail.assert_called_once_with(
+        50000, "mock_build.log", 3000, LOG_MAX_LINE_CHARS, None,
+        LOG_MAX_RESULT_CHARS,
+    )
 
 
 # ── read_log_range ────────────────────────────────────────────────────
@@ -440,8 +461,125 @@ async def test_read_log_tail_default_lines(mock_client):
 @pytest.mark.asyncio
 async def test_read_log_range_tool(mock_client):
     result = await read_log_range(50000, "mock_build.log", 100, 102)
-    assert "lines 100-102 of 5000" in result
+    assert "lines 100-102 of 5,000" in result
     assert "line 100" in result
+
+
+# ── read_log_tail paging footer ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_read_log_tail_prints_the_call_for_the_page_above(mock_client):
+    """The footer spells out the next call, so paging needs no arithmetic."""
+    result = await read_log_tail(50000, "mock_build.log")
+    assert (
+        '↑ earlier: read_log_tail(50000, "mock_build.log", before_line=4990)'
+        in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_footer_uses_the_line_actually_reached(mock_client):
+    """A page cut short by the budget resumes where it stopped, not where asked."""
+    mock_client.read_log_tail = MagicMock(
+        return_value=("cut short", 5000, 4997, 5000)
+    )
+    result = await read_log_tail(50000, "mock_build.log", 3000)
+    assert "before_line=4997" in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_says_when_it_reached_the_top(mock_client):
+    mock_client.read_log_tail = MagicMock(return_value=("all of it", 42, 1, 42))
+    result = await read_log_tail(50000, "mock_root.log")
+    assert "↑ start of log." in result
+    assert "before_line" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_tail_empty_page_is_explained(mock_client):
+    mock_client.read_log_tail = MagicMock(return_value=("", 936, 0, 0))
+    result = await read_log_tail(50000, "mock_build.log", before_line=1)
+    assert "nothing before line 1" in result
+    assert "already the start of the log" in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_range_reports_the_budget_cut(mock_client):
+    mock_client.read_log_range = MagicMock(return_value=("a\nb", 936, 510))
+    result = await read_log_range(50000, "mock_build.log", 1, 936)
+    assert "size budget reached at line 510" in result
+    assert 'read_log_range(50000, "mock_build.log", 511, 936)' in result
+
+
+@pytest.mark.asyncio
+async def test_read_log_range_no_cut_no_footer(mock_client):
+    mock_client.read_log_range = MagicMock(return_value=("a\nb", 936, 102))
+    result = await read_log_range(50000, "mock_build.log", 100, 102)
+    assert "size budget" not in result
+
+
+# ── search_log ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_search_log_tool_marks_matches(mock_client):
+    result = await search_log(50000, "mock_build.log")
+    assert ">>> 827 | foo.c:12:5: error: boom" in result
+    assert "    826 | foo.c: In function 'bar':" in result
+    assert "1 match(es)" in result
+    assert "936 lines" in result
+    assert "3 boilerplate context line(s) omitted" in result
+
+
+@pytest.mark.asyncio
+async def test_search_log_defaults_to_the_failure_signatures(mock_client):
+    await search_log(50000, "mock_build.log")
+    pattern = mock_client.search_log.call_args.args[2]
+    assert pattern == LOG_ERROR_PATTERN
+    assert "default build-failure signatures" in await search_log(
+        50000, "mock_build.log"
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_log_passes_an_explicit_pattern_through(mock_client):
+    result = await search_log(50000, "mock_build.log", "Hunk #1 FAILED")
+    assert mock_client.search_log.call_args.args[2] == "Hunk #1 FAILED"
+    assert "Hunk #1 FAILED" in result.splitlines()[0]
+
+
+@pytest.mark.asyncio
+async def test_search_log_reports_the_cap(mock_client):
+    mock_client.search_log = MagicMock(
+        return_value=([[(1, "error: a", True)]], 50, 900, 0)
+    )
+    result = await search_log(50000, "mock_build.log")
+    assert "50 match(es), showing the first 1" in result
+
+
+@pytest.mark.asyncio
+async def test_search_log_no_matches_suggests_a_next_step(mock_client):
+    mock_client.search_log = MagicMock(return_value=([], 0, 1171, 0))
+    result = await search_log(50000, "mock_root.log")
+    assert "no matches in 1,171 lines" in result
+    assert "read_log_tail" in result
+
+
+@pytest.mark.asyncio
+async def test_search_log_rejects_a_bad_regex(mock_client):
+    mock_client.search_log = MagicMock(side_effect=re.error("bad group"))
+    result = await search_log(50000, "mock_build.log", "error:[")
+    assert result.startswith("Error: invalid regex")
+    assert "bad group" in result
+
+
+@pytest.mark.asyncio
+async def test_search_log_error_no_stack_trace(mock_client):
+    mock_client.search_log = MagicMock(
+        side_effect=ValueError("Invalid log filename: '../x'")
+    )
+    result = await search_log(50000, "../x")
+    assert "Error during searching log ../x" in result
+    assert "Traceback" not in result
 
 
 # ── search_builds ─────────────────────────────────────────────────────
@@ -898,12 +1036,12 @@ async def test_read_log_tail_auto_downloads(mock_client):
     """When the log is not on disk, read_log_tail downloads it, then reads."""
     mock_client.read_log_tail = MagicMock(side_effect=[
         FileNotFoundError("Log not downloaded yet"),
-        ("error: boom", 5000, 4990),
+        ("error: boom", 5000, 4990, 5000),
     ])
     result = await read_log_tail(50000, "mock_build.log", 3000)
     mock_client.download_log.assert_awaited_once_with(50000, "mock_build.log")
     assert "error: boom" in result
-    assert "lines 4990-5000 of 5000" in result
+    assert "lines 4990-5000 of 5,000" in result
 
 
 @pytest.mark.asyncio
@@ -918,7 +1056,7 @@ async def test_read_log_tail_no_download_when_present(mock_client):
 async def test_read_log_range_auto_downloads(mock_client):
     mock_client.read_log_range = MagicMock(side_effect=[
         FileNotFoundError("Log not downloaded yet"),
-        ("line 100\nline 101", 5000),
+        ("line 100\nline 101", 5000, 102),
     ])
     result = await read_log_range(50000, "mock_build.log", 100, 102)
     mock_client.download_log.assert_awaited_once_with(50000, "mock_build.log")
@@ -969,7 +1107,10 @@ def test_investigate_build_prompt_content():
     assert "get_failed_tasks(52679)" in text
     # Investigation ordering hints must survive in the seeded prompt.
     assert text.index("mock_root") < text.index("mock_stderr") < text.index("mock_build")
-    assert "read_log_tail" in text
+    # Search first, then read around what it found.
+    assert text.index("search_log") < text.index("read_log_tail")
+    # And never accept the make wrapper error as the root cause.
+    assert "symptom" in text
 
 
 @pytest.mark.asyncio

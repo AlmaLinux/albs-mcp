@@ -598,6 +598,72 @@ async def test_search_builds_shows_failed_count(mock_client):
     assert "2 failed" in result
 
 
+def _multi_pkg_build() -> dict:
+    """A build whose matching package sorts LAST — the truncation trap."""
+    def task(pkg: str, nvr: str) -> dict:
+        return {
+            "id": 1,
+            "status": 2,
+            "arch": "x86_64",
+            "ref": {
+                "url": f"https://git.almalinux.org/rpms/{pkg}.git",
+                "git_ref": f"imports/c10s/{nvr}",
+            },
+            "artifacts": [],
+            "platform": {"id": 1, "name": "AlmaLinux-Kitten-10"},
+            "test_tasks": [],
+        }
+
+    return {
+        "id": 76538,
+        "created_at": "2026-08-18T15:36:03",
+        "finished_at": "2026-08-18T18:44:51",
+        "owner": {"id": 1, "username": "builder", "email": "b@example.com"},
+        "released": True,
+        "tasks": [
+            task("dovecot", "dovecot-2.3.21-21.el10"),
+            task("gnome-control-center", "gnome-control-center-47.7-14.el10"),
+            task("grubby", "grubby-8.40-84.el10.alma.1"),
+            task("openssh", "openssh-9.9p1-28.el10.alma.1"),
+            task("mingw-glib2", "mingw-glib2-2.89.2-1.el10"),
+        ],
+        "sign_tasks": [],
+        "linked_builds": [],
+        "mock_options": None,
+        "platform_flavors": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_builds_shows_package_versions(mock_client):
+    mock_client.search_builds = AsyncMock(
+        return_value={"builds": [_multi_pkg_build()], "total_builds": 1}
+    )
+    result = await search_builds()
+    assert "dovecot-2.3.21-21.el10" in result
+    assert "[released]" in result
+
+
+@pytest.mark.asyncio
+async def test_search_builds_never_hides_the_matched_package(mock_client):
+    """The package the filter matched must be shown, not truncated away."""
+    mock_client.search_builds = AsyncMock(
+        return_value={"builds": [_multi_pkg_build()], "total_builds": 1}
+    )
+    result = await search_builds(project="mingw-glib2")
+    assert "match: mingw-glib2-2.89.2-1.el10" in result
+    # …and it is not the one swallowed by the "(+N more)" summary.
+    assert "(+1 more)" in result
+
+
+@pytest.mark.asyncio
+async def test_search_builds_branch_ref_has_no_fake_version(mock_client):
+    """A plain-branch git_ref (c9s) must not be printed as a version."""
+    result = await search_builds()
+    assert "glibc" in result
+    assert "glibc-c9s" not in result
+
+
 # ── get_sign_keys ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

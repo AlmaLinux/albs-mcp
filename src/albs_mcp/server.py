@@ -292,6 +292,12 @@ async def search_builds(
 ) -> str:
     """Search builds on ALBS. Returns a page of builds.
 
+    Each build line carries its task count, failed count, and release state,
+    then the packages as full NVRs (``mingw-glib2-2.89.2-1.el10``) so a version
+    question can be answered without opening the build. When `project` is set,
+    the packages that matched it are listed on their own ``match:`` line — the
+    remaining ones are summarised and may be truncated.
+
     Args:
         page: Page number (default 1).
         project: Filter by project/package name.

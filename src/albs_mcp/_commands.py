@@ -137,6 +137,19 @@ async def get_platforms() -> str:
     return "\n".join(lines)
 
 
+def _task_package(task: dict) -> tuple[str, str]:
+    """``(package name, NVR)`` for one build task.
+
+    The name comes from the dist-git repo URL; the NVR from the tail of
+    ``git_ref`` (``imports/c10s/mingw-glib2-2.89.2-1.el10``). A ref that is a
+    plain branch (``c9s``) carries no version, so the bare name is returned as
+    the NVR too — never a branch name masquerading as a version.
+    """
+    name = task["ref"]["url"].split("/")[-1].replace(".git", "")
+    tail = (task["ref"].get("git_ref") or "").split("/")[-1]
+    return name, tail if tail.startswith(f"{name}-") else name
+
+
 def _format_mock_options(opts: dict | None) -> str:
     """Render an ALBS mock_options dict as a compact one-line summary.
 
@@ -226,7 +239,7 @@ async def get_build_info(build_id: int) -> str:
 
     for t in build["tasks"]:
         status = BUILD_TASK_STATUS.get(t["status"], f"unknown({t['status']})")
-        pkg = t["ref"]["url"].split("/")[-1].replace(".git", "")
+        pkg, _ = _task_package(t)
         git_ref = t["ref"].get("git_ref", "N/A")
         log_count = sum(1 for a in t["artifacts"] if a["type"] == "build_log")
         # Only annotate per-task mock options when they are NOT uniform across
@@ -262,7 +275,7 @@ async def get_failed_tasks(build_id: int) -> str:
     lines = [f"Build #{build_id}: {len(failed)} failed task(s)", ""]
 
     for t in failed:
-        pkg = t["ref"]["url"].split("/")[-1].replace(".git", "")
+        pkg, _ = _task_package(t)
         lines.append(f"Task {t['id']} | arch={t['arch']} | pkg={pkg}")
 
         logs = [a["name"] for a in t["artifacts"] if a["type"] == "build_log"]
@@ -454,20 +467,33 @@ async def search_builds(
     lines = [f"Builds (page {page}): {len(builds)} result(s)", ""]
 
     for b in builds[:20]:
-        task_count = len(b.get("tasks", []))
-        failed = sum(1 for t in b.get("tasks", []) if t["status"] == 3)
-        pkgs = set()
-        for t in b.get("tasks", []):
-            name = t["ref"]["url"].split("/")[-1].replace(".git", "")
-            pkgs.add(name)
-        pkg_str = ", ".join(sorted(pkgs)[:3])
-        if len(pkgs) > 3:
-            pkg_str += f" (+{len(pkgs) - 3} more)"
+        tasks = b.get("tasks", [])
+        failed = sum(1 for t in tasks if t["status"] == 3)
+        # NVR per package: a dependency question ("which build carries
+        # mingw-glib2 >= 2.89.2?") cannot be answered from bare names.
+        nvrs: dict[str, str] = {}
+        for t in tasks:
+            name, nvr = _task_package(t)
+            nvrs.setdefault(name, nvr)
         status_str = f"{failed} failed" if failed else "ok"
+        released = "released" if b.get("released") else "unreleased"
         lines.append(
             f"  #{b['id']}  {b['created_at'][:10]}  "
-            f"tasks={task_count} [{status_str}]  {pkg_str}"
+            f"tasks={len(tasks)} [{status_str}] [{released}]"
         )
+        # A build is in a filtered result set because ONE of its packages
+        # matched `project` — that package must never end up hidden behind
+        # "(+N more)", or the search silently answers the wrong question.
+        needle = (project or "").lower()
+        matched = [n for n in sorted(nvrs) if needle and needle in n.lower()]
+        if matched:
+            lines.append(f"      match: {', '.join(nvrs[n] for n in matched)}")
+        rest = [n for n in sorted(nvrs) if n not in set(matched)]
+        if rest:
+            pkg_str = ", ".join(nvrs[n] for n in rest[:3])
+            if len(rest) > 3:
+                pkg_str += f" (+{len(rest) - 3} more)"
+            lines.append(f"      pkgs: {pkg_str}")
 
     return "\n".join(lines)
 

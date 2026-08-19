@@ -194,7 +194,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `search_log` | **Start here on a failure**: grep a log for the build-failure signatures (or your own regex) and get every hit with line numbers and context; auto-downloads if needed |
 | `read_log_tail` | Read a page of a log from the end, and page upward from there (`before_line`); each result prints the exact call for the page above it. Shows how the build terminated, not where the compile error is |
 | `read_log_range` | Read a specific line range from a log (e.g. around a `search_log` hit); stops at the size budget and tells you how to continue |
-| `search_builds` | Browse builds by page, filter by package name or running status |
+| `search_builds` | Browse builds by page, filter by package name or running status — shows each package as an NVR plus the build's release state; a `project` filter lists the matched package on its own `match:` line |
 | `get_sign_task_status` | Status of a build's sign tasks (idle/in_progress/completed/failed) — use after `sign_build` |
 | `get_products` | List all products (release targets): ID, name, official/community, platforms |
 | `get_release_plan` | View an existing release: status, source packages, target repositories |
@@ -301,7 +301,7 @@ The agent will:
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 260 tests)
+# Unit tests (no network, 263 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
 # Integration tests (hits real ALBS API, read-only, 30 tests)

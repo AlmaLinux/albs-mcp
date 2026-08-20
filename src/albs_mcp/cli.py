@@ -12,6 +12,13 @@ import os
 import sys
 
 from . import _commands as cmd
+from .constants import (
+    LOG_MAX_LINE_CHARS,
+    LOG_MAX_RESULT_CHARS,
+    LOG_SEARCH_AFTER,
+    LOG_SEARCH_BEFORE,
+    LOG_SEARCH_MAX_MATCHES,
+)
 
 _ERROR_PREFIXES = ("Error", "Auth error")
 
@@ -67,12 +74,24 @@ def _cmd_download_log(args: argparse.Namespace) -> None:
 
 
 def _cmd_log_tail(args: argparse.Namespace) -> None:
-    _exec(cmd.read_log_tail(args.build_id, args.filename, args.lines))
+    _exec(cmd.read_log_tail(
+        args.build_id, args.filename, args.lines, args.max_line_chars,
+        args.before_line, args.max_chars,
+    ))
 
 
 def _cmd_log_range(args: argparse.Namespace) -> None:
     _exec(cmd.read_log_range(
         args.build_id, args.filename, args.start_line, args.end_line,
+        args.max_line_chars, args.max_chars,
+    ))
+
+
+def _cmd_log_search(args: argparse.Namespace) -> None:
+    _exec(cmd.search_log(
+        args.build_id, args.filename, args.pattern,
+        args.before, args.after, args.max_matches, args.max_line_chars,
+        args.max_chars,
     ))
 
 
@@ -203,6 +222,18 @@ def build_parser() -> argparse.ArgumentParser:
         "-n", "--lines", type=int, default=3000,
         help="Number of lines from the end (default: 3000).",
     )
+    p.add_argument(
+        "--before-line", type=int, default=None,
+        help="Read the page ending just before this line (page upward).",
+    )
+    p.add_argument(
+        "--max-line-chars", type=int, default=LOG_MAX_LINE_CHARS,
+        help=f"Clip each line (default: {LOG_MAX_LINE_CHARS}, 0 = verbatim).",
+    )
+    p.add_argument(
+        "--max-chars", type=int, default=LOG_MAX_RESULT_CHARS,
+        help=f"Result size budget in chars (default: {LOG_MAX_RESULT_CHARS}, 0 = unlimited).",
+    )
     p.set_defaults(func=_cmd_log_tail)
 
     # ── log-range ─────────────────────────────────────────────────────
@@ -211,7 +242,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("filename")
     p.add_argument("start_line", type=int)
     p.add_argument("end_line", type=int)
+    p.add_argument(
+        "--max-line-chars", type=int, default=LOG_MAX_LINE_CHARS,
+        help=f"Clip each line (default: {LOG_MAX_LINE_CHARS}, 0 = verbatim).",
+    )
+    p.add_argument(
+        "--max-chars", type=int, default=LOG_MAX_RESULT_CHARS,
+        help=f"Result size budget in chars (default: {LOG_MAX_RESULT_CHARS}, 0 = unlimited).",
+    )
     p.set_defaults(func=_cmd_log_range)
+
+    # ── log-search ────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "log-search",
+        help="Grep a build log for the failure and show it with context.",
+    )
+    p.add_argument("build_id", type=int)
+    p.add_argument("filename")
+    p.add_argument(
+        "-e", "--pattern", default=None,
+        help="Regex to search (default: the built-in build-failure signatures).",
+    )
+    p.add_argument(
+        "-B", "--before", type=int, default=LOG_SEARCH_BEFORE,
+        help=f"Context lines before a match (default: {LOG_SEARCH_BEFORE}).",
+    )
+    p.add_argument(
+        "-A", "--after", type=int, default=LOG_SEARCH_AFTER,
+        help=f"Context lines after a match (default: {LOG_SEARCH_AFTER}).",
+    )
+    p.add_argument(
+        "-m", "--max-matches", type=int, default=LOG_SEARCH_MAX_MATCHES,
+        help=f"Matches to report (default: {LOG_SEARCH_MAX_MATCHES}).",
+    )
+    p.add_argument(
+        "--max-line-chars", type=int, default=LOG_MAX_LINE_CHARS,
+        help=f"Clip each line (default: {LOG_MAX_LINE_CHARS}, 0 = verbatim).",
+    )
+    p.add_argument(
+        "--max-chars", type=int, default=LOG_MAX_RESULT_CHARS,
+        help=f"Result size budget in chars (default: {LOG_MAX_RESULT_CHARS}, 0 = unlimited).",
+    )
+    p.set_defaults(func=_cmd_log_search)
 
     # ── search ────────────────────────────────────────────────────────
     p = sub.add_parser("search", help="Search builds on ALBS.")

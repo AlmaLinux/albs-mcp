@@ -22,7 +22,8 @@ albs build-info BUILD_ID                    # build details, tasks, statuses
 albs failed-tasks BUILD_ID                  # failed tasks with log files
 albs build-logs BUILD_ID                    # list all log files on server
 albs download-log BUILD_ID FILENAME         # download a log file
-albs log-tail BUILD_ID FILENAME [-n LINES]  # last N lines (default 3000)
+albs log-search BUILD_ID FILENAME [-e RE]   # grep a log for the failure, with context
+albs log-tail BUILD_ID FILENAME             # a page from the end; --before-line N pages up
 albs log-range BUILD_ID FILENAME START END  # specific line range
 albs search [--project NAME] [--page N]     # search builds
 albs sign-keys                              # list sign keys (requires JWT)
@@ -43,11 +44,13 @@ Follow this exact order:
 
 1. `albs build-info BUILD_ID` — see all tasks and statuses.
 2. `albs failed-tasks BUILD_ID` — see failed tasks with log file names. Logs marked with ★ are key: mock_root, mock_stderr, mock_build.
-3. `albs download-log BUILD_ID FILENAME` — download the key log. Start with mock_root (dependency issues), then mock_stderr, then mock_build.
-4. `albs log-tail BUILD_ID FILENAME` — read from the end. Errors are almost always at the bottom. Default is 3000 lines.
-5. If the root cause is not visible, use `albs log-range` to look at earlier sections.
+3. `albs log-search BUILD_ID FILENAME` — grep the log for the standard failure signatures (compiler errors, failed patch hunks, unresolved BuildRequires, RPM errors, %check failures, OOM/network trouble) and get each hit with its line number and context. It auto-downloads, so `download-log` is optional. Run it on mock_root, mock_stderr, AND mock_build.
+4. `albs log-tail BUILD_ID FILENAME` — see how the build terminated. Do NOT stop here: `make -j` keeps compiling after the first failure, so the tail of a mock_build log shows only `make: *** [Makefile:NNNN: all] Error 2` — the symptom. Reporting that as the root cause is a wrong answer.
+5. `albs log-range BUILD_ID FILENAME START END` — widen the context around a line number log-search reported.
+6. When the search finds nothing and you must READ the log, page it bottom-up: run `albs log-tail`, then copy the `↑ earlier:` command printed at the bottom of the output, and repeat. Pages are sized to the result budget and join up exactly — guessing a `log-range` window is how you miss the error.
+7. Report the failing file, line, and diagnostic — not the make wrapper error.
 
-IMPORTANT: mock_build logs can be 100k+ lines. NEVER read the whole file. Always use log-tail first.
+IMPORTANT: mock_build logs can be 100k+ lines with single lines several KB long. NEVER read the whole file. Lines are clipped to 500 chars and each result to 40000 chars (`--max-line-chars 0` / `--max-chars 0` to lift); leave both on for broad reads and page instead.
 
 ## Creating builds
 

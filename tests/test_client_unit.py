@@ -9,6 +9,7 @@ import pytest
 
 from albs_mcp.client import (
     ALBSClient,
+    clip_line,
     extract_el_version,
     get_completed_task_ids,
     get_whole_package_task_ids,
@@ -107,6 +108,19 @@ SAMPLE_LOG_LISTING = """
 <a href="mock.100002.12346.cfg">mock.100002.12346.cfg</a>
 <a href="albs.100002.12346.log">albs.100002.12346.log</a>
 </body>
+</html>
+"""
+
+# What ALBS actually serves today: nginx autoindex with relative hrefs.
+SAMPLE_LOG_LISTING_RELATIVE = """
+<html>
+<head><title>Index of /pulp/content/build_logs/build-70368-build_log/</title></head>
+<body bgcolor="white">
+<hr><pre><a href="../">../</a>
+<a href="./PULP_MANIFEST">PULP_MANIFEST</a>                      11-Aug-2026 08:23  142.7 kB
+<a href="./mock_build.441500.1785274367.log">mock_build.441500.1785274367.log</a>  28-Jul-2026 21:34  602 kB
+<a href="./mock.441500.1785274367.cfg">mock.441500.1785274367.cfg</a>        28-Jul-2026 21:32  5.4 kB
+</pre><hr></body>
 </html>
 """
 
@@ -216,6 +230,26 @@ async def test_list_build_logs(client):
     assert len(logs) == 5
 
 
+@pytest.mark.asyncio
+async def test_list_build_logs_strips_the_relative_prefix(client):
+    """Pulp serves hrefs as './name'; a listed name must be readable as-is.
+
+    Without stripping, every returned name carries a path separator and is
+    rejected by the _log_path whitelist, so listing a build's logs and then
+    reading one fails.
+    """
+    resp = _mock_response(None)
+    resp.text = SAMPLE_LOG_LISTING_RELATIVE
+    client._http.get = AsyncMock(return_value=resp)
+    logs = await client.list_build_logs(12345)
+    assert logs == [
+        "mock_build.441500.1785274367.log",
+        "mock.441500.1785274367.cfg",
+    ]
+    for name in logs:
+        client._log_path(12345, name)  # must not raise
+
+
 # ── download_log ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -251,9 +285,9 @@ def test_read_log_tail(client, tmp_log_dir):
     lines = [f"line {i}" for i in range(100)]
     log_file.write_text("\n".join(lines))
 
-    content, total, from_line = client.read_log_tail(12345, "mock_build.log", 10)
+    content, total, first, last = client.read_log_tail(12345, "mock_build.log", 10)
     assert total == 100
-    assert from_line == 91
+    assert (first, last) == (91, 100)
     assert "line 99" in content
     assert "line 90" in content
     assert "line 89" not in content
@@ -265,9 +299,9 @@ def test_read_log_tail_small_file(client, tmp_log_dir):
     log_file = log_dir / "small.log"
     log_file.write_text("only one line")
 
-    content, total, from_line = client.read_log_tail(12345, "small.log", 3000)
+    content, total, first, last = client.read_log_tail(12345, "small.log", 3000)
     assert total == 1
-    assert from_line == 1
+    assert (first, last) == (1, 1)
     assert content == "only one line"
 
 
@@ -336,8 +370,8 @@ def test_read_log_range(client, tmp_log_dir):
     lines = [f"line {i}" for i in range(100)]
     log_file.write_text("\n".join(lines))
 
-    content, total = client.read_log_range(12345, "mock_build.log", 50, 55)
-    assert total == 100
+    content, total, last = client.read_log_range(12345, "mock_build.log", 50, 55)
+    assert (total, last) == (100, 55)
     assert "line 49" in content
     assert "line 54" in content
     assert "line 55" not in content
@@ -349,14 +383,280 @@ def test_read_log_range_clamped(client, tmp_log_dir):
     log_file = log_dir / "test.log"
     log_file.write_text("a\nb\nc")
 
-    content, total = client.read_log_range(12345, "test.log", 1, 9999)
-    assert total == 3
+    content, total, last = client.read_log_range(12345, "test.log", 1, 9999)
+    assert (total, last) == (3, 3)
     assert content == "a\nb\nc"
 
 
 def test_read_log_range_not_downloaded(client):
     with pytest.raises(FileNotFoundError, match="not downloaded"):
         client.read_log_range(99999, "missing.log", 1, 10)
+
+
+def test_read_log_range_stops_at_the_char_budget(client, tmp_log_dir):
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "big.log").write_text("\n".join("x" * 100 for _ in range(100)))
+
+    content, total, last = client.read_log_range(
+        12345, "big.log", 1, 100, max_chars=500,
+    )
+    assert total == 100
+    # Stopped early and said where, instead of returning all 10 KB.
+    assert last < 100
+    assert len(content) <= 700
+
+
+# ── read_log_tail paging (bottom-up) ──────────────────────────────────
+
+def test_read_log_tail_pages_upward_without_a_gap(client, tmp_log_dir):
+    """Feeding `first` back as `before_line` must continue exactly one line up."""
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "paged.log").write_text(
+        "\n".join(f"line {i}" for i in range(1, 101))
+    )
+
+    seen: list[int] = []
+    before: int | None = None
+    for _ in range(10):
+        content, total, first, last = client.read_log_tail(
+            12345, "paged.log", 15, before_line=before,
+        )
+        assert total == 100
+        if not content:
+            break
+        seen = list(range(first, last + 1)) + seen
+        before = first
+        if first == 1:
+            break
+
+    # Every line reported exactly once, in order, start to end.
+    assert seen == list(range(1, 101))
+
+
+def test_read_log_tail_before_line_excludes_that_line(client, tmp_log_dir):
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "paged.log").write_text(
+        "\n".join(f"line {i}" for i in range(1, 101))
+    )
+
+    content, total, first, last = client.read_log_tail(
+        12345, "paged.log", 10, before_line=50,
+    )
+    assert (total, first, last) == (100, 40, 49)
+    assert "line 49" in content
+    assert "line 50" not in content
+
+
+def test_read_log_tail_before_line_1_is_empty(client, tmp_log_dir):
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "paged.log").write_text("a\nb\nc")
+
+    content, total, first, last = client.read_log_tail(
+        12345, "paged.log", 10, before_line=1,
+    )
+    assert content == ""
+    assert total == 3  # the real length is still reported
+    assert (first, last) == (0, 0)
+
+
+def test_read_log_tail_budget_shrinks_the_page_from_the_top(client, tmp_log_dir):
+    """The budget, not the line count, decides the page — and keeps the bottom."""
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "wide.log").write_text("\n".join("y" * 100 for _ in range(50)))
+
+    content, total, first, last = client.read_log_tail(
+        12345, "wide.log", 50, max_chars=500,
+    )
+    assert (total, last) == (50, 50)  # the end of the log is always kept
+    assert first > 1                  # ...the top of the page was dropped
+    assert len(content) <= 500
+
+
+def test_read_log_tail_budget_always_returns_one_line(client, tmp_log_dir):
+    """A single line longer than the whole budget is still returned."""
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "one.log").write_text("short\n" + "z" * 400)
+
+    content, _total, first, last = client.read_log_tail(
+        12345, "one.log", 50, max_line_chars=0, max_chars=10,
+    )
+    assert (first, last) == (2, 2)
+    assert content == "z" * 400
+
+
+def test_read_log_tail_budget_off(client, tmp_log_dir):
+    log_dir = tmp_log_dir / "12345"
+    log_dir.mkdir(parents=True)
+    (log_dir / "wide.log").write_text("\n".join("y" * 100 for _ in range(50)))
+
+    _content, _total, first, last = client.read_log_tail(
+        12345, "wide.log", 50, max_chars=0,
+    )
+    assert (first, last) == (1, 50)
+
+
+# ── clip_line ─────────────────────────────────────────────────────────
+
+def test_clip_line_leaves_short_line_alone():
+    assert clip_line("short", 100) == "short"
+
+
+def test_clip_line_disabled_by_zero_limit():
+    long = "x" * 5000
+    assert clip_line(long, 0) == long
+
+
+def test_clip_line_clips_tail_and_reports_the_loss():
+    out = clip_line("y" * 700, 500)
+    assert out.startswith("y" * 500)
+    assert out.endswith("…[200 chars clipped]")
+
+
+def test_clip_line_keeps_a_deep_match_visible():
+    """An error 4000 chars into a gcc command line must survive clipping."""
+    line = "gcc " + "-DFLAG " * 570 + "error: boom"
+    anchor = line.index("error:")
+    out = clip_line(line, 500, anchor)
+    assert "error: boom" in out
+    assert out.startswith("…[")
+
+
+# ── search_log ────────────────────────────────────────────────────────
+
+def _write_log(tmp_log_dir, name: str, lines: list[str], build_id: int = 12345):
+    log_dir = tmp_log_dir / str(build_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / name).write_text("\n".join(lines))
+
+
+def test_search_log_finds_the_match_with_context(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "mock_build.log", [
+        "configuring",
+        "compiling foo.c",
+        "foo.c:12:5: error: boom",
+        "  12 | bad code",
+        "     |     ^",
+        "unrelated tail",
+    ])
+    hunks, matches, total, omitted = client.search_log(
+        12345, "mock_build.log", r"\berror:", before=1, after=2,
+    )
+    assert (matches, total, omitted) == (1, 6, 0)
+    assert [(n, m) for n, _, m in hunks[0]] == [
+        (2, False), (3, True), (4, False), (5, False),
+    ]
+
+
+def test_search_log_reports_no_matches(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "mock_root.log", ["all fine", "still fine"])
+    hunks, matches, total, omitted = client.search_log(
+        12345, "mock_root.log", r"\berror:",
+    )
+    assert (hunks, matches, total) == ([], 0, 2)
+
+
+def test_search_log_caps_matches_but_counts_them_all(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "many.log", [f"error: {i}" for i in range(50)])
+    hunks, matches, total, _ = client.search_log(
+        12345, "many.log", r"\berror:", max_matches=3,
+    )
+    assert matches == 50
+    assert total == 50
+    assert sum(1 for hunk in hunks for line in hunk if line[2]) == 3
+
+
+def test_search_log_merges_neighbouring_matches_into_one_hunk(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "two.log", [
+        "error: first", "middle", "error: second", "after",
+    ])
+    hunks, matches, _, _ = client.search_log(
+        12345, "two.log", r"\berror:", before=2, after=2,
+    )
+    assert matches == 2
+    # One hunk, and the shared "middle" line reported exactly once.
+    assert len(hunks) == 1
+    assert [n for n, _, _ in hunks[0]] == [1, 2, 3, 4]
+
+
+def test_search_log_splits_distant_matches_into_separate_hunks(client, tmp_log_dir):
+    _write_log(
+        tmp_log_dir, "far.log",
+        ["error: first"] + ["filler"] * 50 + ["error: second"],
+    )
+    hunks, matches, _, _ = client.search_log(
+        12345, "far.log", r"\berror:", before=1, after=1,
+    )
+    assert matches == 2
+    assert len(hunks) == 2
+
+
+def test_search_log_drops_boilerplate_from_context_only(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "noisy.log", [
+        "make[1]: Entering directory '/build'",
+        "foo.c:1:1: error: boom",
+        "libtool: compile:  gcc -DBIG " + "-DFLAG " * 500,
+        "  1 | bad code",
+    ])
+    hunks, matches, _, omitted = client.search_log(
+        12345, "noisy.log", r"\berror:", before=2, after=2,
+    )
+    assert matches == 1
+    assert omitted == 1  # the libtool line, dropped from the after-window
+    assert [n for n, _, _ in hunks[0]] == [2, 4]
+
+
+def test_search_log_keeps_boilerplate_that_itself_matches(client, tmp_log_dir):
+    """A noise-shaped line is still reported when it is the match itself."""
+    _write_log(tmp_log_dir, "noisy2.log", [
+        "make[1]: Entering directory '/build'",
+        "make[1]: *** [Makefile:99: all] Error 2",
+    ])
+    hunks, matches, _, _ = client.search_log(
+        12345, "noisy2.log", r"make(\[\d+\])?: \*\*\*",
+    )
+    assert matches == 1
+    assert hunks[0][0][0] == 2
+
+
+def test_search_log_ignores_a_far_away_before_line(client, tmp_log_dir):
+    """Boilerplate filtering must not drag in context from 100 lines back."""
+    _write_log(tmp_log_dir, "gap.log", [
+        "meaningful setup line",
+        *[f"libtool: compile:  gcc -c f{i}.c" for i in range(100)],
+        "foo.c:1:1: error: boom",
+    ])
+    hunks, matches, _, _ = client.search_log(
+        12345, "gap.log", r"\berror:", before=2, after=0,
+    )
+    assert matches == 1
+    assert [n for n, _, _ in hunks[0]] == [102]
+
+
+def test_search_log_clips_the_matched_line(client, tmp_log_dir):
+    _write_log(tmp_log_dir, "long.log", ["error: " + "z" * 2000])
+    hunks, _, _, _ = client.search_log(
+        12345, "long.log", r"\berror:", max_line_chars=200,
+    )
+    text = hunks[0][0][1]
+    assert text.startswith("error: ")
+    assert "chars clipped]" in text
+    assert len(text) < 300
+
+
+def test_search_log_not_downloaded(client):
+    with pytest.raises(FileNotFoundError, match="not downloaded"):
+        client.search_log(99999, "missing.log", "error")
+
+
+def test_search_log_rejects_traversal(client):
+    with pytest.raises(ValueError, match="Invalid log filename"):
+        client.search_log(12345, "../../etc/passwd", "error")
 
 
 # ── auth_headers ──────────────────────────────────────────────────────

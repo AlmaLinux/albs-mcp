@@ -6,38 +6,40 @@
       "name": "investigate_basic",
       "category": "build_failure",
       "prompt": "Build 12345 failed. Can you investigate why?",
-      "expected_output": "Agent calls get_build_info(12345) first, then get_failed_tasks(12345), then read_log_tail at least once (read_log_tail auto-downloads; an explicit download_log call is optional). Final response identifies root cause: missing dependency (libfoo-devel).",
+      "expected_output": "Agent calls get_build_info(12345) first, then get_failed_tasks(12345), then search_log at least once (search_log auto-downloads; an explicit download_log call is optional). Final response identifies root cause: missing dependency (libfoo-devel).",
       "criteria": [
         "The agent calls get_build_info with build_id=12345 as the first tool call",
         "The agent calls get_failed_tasks with build_id=12345",
-        "The agent calls read_log_tail at least once (it auto-downloads the log; a separate download_log call is allowed but not required)",
+        "The agent calls search_log at least once (it auto-downloads the log; a separate download_log call is allowed but not required)",
         "The agent's final response identifies the root cause: missing dependency (libfoo-devel)"
       ],
       "files": []
     },
     {
       "id": 2,
-      "name": "investigate_log_priority",
+      "name": "investigate_searches_before_reading",
       "category": "build_failure",
       "prompt": "What happened with build 12345? It failed.",
-      "expected_output": "Agent calls get_build_info before log tools, get_failed_tasks before reading logs, reads mock_root BEFORE mock_build, and does NOT call read_log_range before read_log_tail.",
+      "expected_output": "Agent calls get_build_info before log tools, get_failed_tasks before touching logs, and search_log BEFORE read_log_tail / read_log_range — the error is located by grepping, not by guessing line offsets.",
       "criteria": [
         "The agent calls get_build_info before any log-reading tools",
         "The agent calls get_failed_tasks before reading logs",
-        "The agent reads mock_root BEFORE mock_build (mock_root is checked first for dependency issues)",
-        "The agent does NOT call read_log_range before read_log_tail"
+        "The agent calls search_log before read_log_tail or read_log_range",
+        "The agent does NOT call read_log_range before it has a line number from search_log"
       ],
       "files": []
     },
     {
       "id": 3,
-      "name": "investigate_reads_from_end",
+      "name": "investigate_does_not_stop_at_make_error",
       "category": "build_failure",
-      "prompt": "Why did build 12345 fail?",
-      "expected_output": "Agent uses read_log_tail (not read_log_range) for initial log read. If read_log_range is called at all, it happens AFTER read_log_tail.",
+      "prompt": "Why did build 12345 fail? Its mock_build log ends with `make: *** [Makefile:4615: all] Error 2` and `error: Bad exit status from /var/tmp/rpm-tmp.SaTsNT (%build)`.",
+      "expected_output": "Agent recognises `make: *** ... Error 2` as the symptom, not the cause: it runs search_log on mock_build to find the actual compiler diagnostic and reports the file, line, and message. It does NOT report the Makefile line as the root cause.",
       "criteria": [
-        "The agent uses read_log_tail (not read_log_range) for the initial log read — errors are at the end",
-        "If read_log_range is called at all, it happens AFTER read_log_tail (for looking at earlier sections)"
+        "The agent calls search_log on the mock_build log",
+        "The agent explains that `make: *** [Makefile:NNNN: all] Error 2` is the symptom and the real error sits earlier in the log because `make -j` keeps compiling after the first failure",
+        "The agent does NOT present the Makefile line number as the root cause",
+        "The agent does NOT hand the failure off to a human without first searching for the compiler diagnostic"
       ],
       "files": []
     },
@@ -46,10 +48,12 @@
       "name": "investigate_large_log_safety",
       "category": "build_failure",
       "prompt": "Build 99000 failed. Help me debug it.",
-      "expected_output": "Agent uses read_log_tail to read the 187k-line mock_build log (never reads from line 1). Identifies compilation failure (make error / Bad exit status).",
+      "expected_output": "Agent uses search_log on the 187k-line mock_build log and, if it must read, pages from the end with read_log_tail + the `↑ earlier:` call it prints. Never reads from line 1 and never lifts the size caps for a broad read. Identifies compilation failure (make error / Bad exit status).",
       "criteria": [
-        "The agent uses read_log_tail to read logs (not read_log_range from line 1)",
+        "The agent uses search_log to locate the error in the log rather than paging through it blindly",
         "The agent does NOT attempt to read the entire 187k-line mock_build log from the beginning",
+        "If the agent needs to read the log, it pages upward using read_log_tail's before_line rather than guessing read_log_range windows",
+        "The agent keeps the size caps on (does not pass max_line_chars=0 or max_chars=0 for a broad read)",
         "The agent identifies the build error: compilation failure (make error / Bad exit status)"
       ],
       "files": []
@@ -304,14 +308,13 @@
       "id": 24,
       "name": "prompt_investigate_build",
       "category": "prompt",
-      "prompt": "Investigate why ALBS build 52679 failed.\n\nFollow the build-failure investigation workflow from the albs-mcp server instructions:\n1. Call get_build_info(52679) to see all tasks and statuses.\n2. Call get_failed_tasks(52679) to list failed tasks and their log files (★ marks the key logs).\n3. For each failed task, read the key logs in order — mock_root first (chroot/dependency issues), then mock_stderr, then mock_build — from the end with read_log_tail (it auto-downloads) before using read_log_range. Never read a large mock_build log from line 1.\n4. Report the root cause of the failure, citing the log evidence.",
-      "expected_output": "This is the text seeded by the investigate_build MCP prompt for build_id=52679. The agent follows it: get_build_info(52679) first, then get_failed_tasks(52679), then reads mock_root before mock_build using read_log_tail before read_log_range, and reports the root cause.",
+      "prompt": "Investigate why ALBS build 52679 failed.\n\nFollow the build-failure investigation workflow from the albs-mcp server instructions:\n1. Call get_build_info(52679) to see all tasks and statuses.\n2. Call get_failed_tasks(52679) to list failed tasks and their log files (★ marks the key logs).\n3. For each failed task, run search_log on the key logs (it auto-downloads) to locate the failure — mock_root for chroot/dependency issues, mock_stderr for crashes, mock_build for the compile. Then use read_log_tail and read_log_range around the line numbers it reports. Never read a large mock_build log from line 1.\n3a. If the search comes up empty, page the log bottom-up: call read_log_tail, then copy the `↑ earlier:` call it prints to get the page above, and repeat. Do not guess read_log_range windows.\n4. Report the root cause of the failure, citing the log evidence: the file, line, and diagnostic. `make: *** [Makefile:NNNN: all] Error 2` is a symptom, not a root cause — keep digging until you have the error that caused it.",
+      "expected_output": "This is the text seeded by the investigate_build MCP prompt for build_id=52679. The agent follows it: get_build_info(52679) first, then get_failed_tasks(52679), then search_log on the key logs before reading ranges, and reports the root cause with the file/line/diagnostic.",
       "criteria": [
         "The agent calls get_build_info with build_id=52679 as the first tool call",
         "The agent calls get_failed_tasks with build_id=52679",
-        "The agent reads mock_root BEFORE mock_build",
-        "The agent uses read_log_tail before read_log_range",
-        "The agent's final response reports the root cause of the failure"
+        "The agent calls search_log before read_log_tail or read_log_range",
+        "The agent's final response reports the root cause with the failing file, line, and diagnostic — not just a make/Makefile line"
       ],
       "files": []
     },
@@ -419,6 +422,81 @@
         "The agent asks the user which product (and platform) to release to before creating the plan",
         "The agent does NOT call commit_release",
         "The agent's final response makes clear nothing was published — it is only a plan"
+      ],
+      "files": []
+    },
+    {
+      "id": 33,
+      "name": "route_log_search",
+      "category": "tool_selection",
+      "prompt": "Find the compile error in build 70368's i686 mock_build log.",
+      "expected_output": "Agent calls search_log for the mock_build log of the i686 task. Does NOT page through the log with read_log_range.",
+      "criteria": [
+        "The agent calls search_log with build_id=70368 and the i686 task's mock_build log",
+        "The agent does not pass an explicit pattern, or passes one covering compiler errors — the default already covers them",
+        "The agent does NOT call read_log_range repeatedly to hunt for the error"
+      ],
+      "files": []
+    },
+    {
+      "id": 34,
+      "name": "log_search_custom_pattern",
+      "category": "tool_selection",
+      "prompt": "Did any patch fail to apply in build 12345?",
+      "expected_output": "Agent calls search_log with a pattern matching failed patch hunks (e.g. 'Hunk #\\\\d+ FAILED' or 'can't find file to patch') on the mock_build log.",
+      "criteria": [
+        "The agent calls search_log on the mock_build log",
+        "The agent passes a pattern targeting patch failures (Hunk FAILED / can't find file to patch), rather than relying on the default signatures"
+      ],
+      "files": []
+    },
+    {
+      "id": 35,
+      "name": "log_search_verbatim_quote",
+      "category": "error_handling",
+      "prompt": "search_log showed the failing line but it ends with '…[2457 chars clipped]'. I need that whole gcc command line.",
+      "expected_output": "Agent explains that lines are clipped to 500 chars by default and re-reads just that line with max_line_chars=0 (via read_log_range on the reported line number, or search_log with max_line_chars=0).",
+      "criteria": [
+        "The agent re-reads the line with max_line_chars=0 instead of claiming the full line is unavailable",
+        "The agent scopes the unclipped read to the single line / a narrow range, not the whole log"
+      ],
+      "files": []
+    },
+    {
+      "id": 36,
+      "name": "pages_a_log_bottom_up",
+      "category": "build_failure",
+      "prompt": "search_log found nothing in build 12345's mock_build log, but the build clearly failed. Read the log and tell me what happened.",
+      "expected_output": "Agent calls read_log_tail, then follows the `↑ earlier: read_log_tail(..., before_line=N)` call printed at the bottom of the result to walk upward, repeating until it finds the failure or reaches the start of the log.",
+      "criteria": [
+        "The agent calls read_log_tail on the mock_build log",
+        "To see earlier content the agent uses the before_line value from the previous result's footer, not a hand-computed read_log_range window",
+        "The agent does not lift max_chars / max_line_chars to pull the whole log in one call"
+      ],
+      "files": []
+    },
+    {
+      "id": 37,
+      "name": "range_budget_continuation",
+      "category": "error_handling",
+      "prompt": "I asked for read_log_range(70368, \"mock_build.441500.1785274367.log\", 1, 936) and it stopped at line 510 saying the size budget was reached. Did I lose the rest?",
+      "expected_output": "Agent explains nothing was lost: the read stopped at the budget and printed the exact continuation call (start_line=511), which it uses to fetch the remainder — or points out that search_log would answer the question in one call instead.",
+      "criteria": [
+        "The agent states that no content was silently dropped — the read stopped and reported where",
+        "The agent continues from line 511 using the printed call, or proposes search_log instead of reading the whole log"
+      ],
+      "files": []
+    },
+    {
+      "id": 38,
+      "name": "search_reports_versions",
+      "category": "tool_selection",
+      "prompt": "A build fails on 'No matching package to install: mingw32-glib2 >= 2.89.2'. Has a mingw-glib2 that new been built in ALBS yet?",
+      "expected_output": "Calls search_builds with project=\"mingw-glib2\" and answers from the NVR on the 'match:' line of the result (plus its [released] state) — it does NOT conclude 'not built' from a truncated package list, and does not need get_build_info to learn the version.",
+      "criteria": [
+        "The agent calls search_builds with project=\"mingw-glib2\" (or similar)",
+        "The version verdict is taken from the NVR printed by search_builds, not guessed from package names or a build date",
+        "The agent does NOT report the package as never built while a listed build carries a matching NVR"
       ],
       "files": []
     }

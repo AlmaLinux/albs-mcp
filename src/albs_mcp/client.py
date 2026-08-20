@@ -13,8 +13,71 @@ from .constants import (
     ALBS_LOGS_BASE,
     BETA_PLATFORM_FLAVORS,
     BUILD_TASK_COMPLETED,
+    LOG_CLIP_LEAD_CHARS,
+    LOG_MAX_LINE_CHARS,
+    LOG_MAX_RESULT_CHARS,
+    LOG_NOISE_PATTERN,
+    LOG_SEARCH_BEFORE_SPAN,
+    LOG_SEARCH_MAX_MATCHES,
     SECURE_BOOT_PACKAGES,
 )
+
+# One log line with its 1-based number and whether it matched the search.
+LogLine = tuple[int, str, bool]
+
+
+def clip_line(text: str, limit: int, anchor: int = 0) -> str:
+    """Clip *text* to *limit* characters, keeping the window around *anchor*.
+
+    `anchor` is an index that MUST stay visible — the position of a regex match
+    — so an error buried deep inside a multi-KB gcc command line is not clipped
+    away. A `limit` of 0 (or a line already short enough) returns *text*
+    unchanged. Clipped-away characters are reported inline so a reader can tell
+    the line is not verbatim.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    start = 0
+    if anchor + LOG_CLIP_LEAD_CHARS > limit:
+        start = min(anchor - LOG_CLIP_LEAD_CHARS, len(text) - limit)
+        start = max(0, start)
+    end = min(len(text), start + limit)
+    out = text[start:end]
+    if start:
+        out = f"…[{start} chars clipped]{out}"
+    if end < len(text):
+        out = f"{out}…[{len(text) - end} chars clipped]"
+    return out
+
+
+def _trim_to_budget(window: deque[tuple[int, str]], max_chars: int) -> None:
+    """Drop lines off the TOP of *window* until it fits `max_chars`.
+
+    The bottom of a build log is the interesting end, so a page that overflows
+    loses its oldest lines. One line always survives, even if it alone exceeds
+    the budget — returning nothing would tell the caller nothing.
+    """
+    if max_chars <= 0 or not window:
+        return
+    size = sum(len(text) + 1 for _, text in window)
+    while size > max_chars and len(window) > 1:
+        _, text = window.popleft()
+        size -= len(text) + 1
+
+
+def _hunk_size(hunk: list[LogLine]) -> int:
+    """Rendered character count of a hunk, one newline per line."""
+    return sum(len(text) + 1 for _, text, _ in hunk)
+
+
+def _extend_hunk(hunk: list[LogLine], block: list[LogLine]) -> None:
+    """Append *block* to *hunk*, dropping lines it already reported.
+
+    A `before` window can reach back into the preceding match's `after` window;
+    without this each overlapping line would be printed twice.
+    """
+    last = hunk[-1][0] if hunk else 0
+    hunk.extend(line for line in block if line[0] > last)
 
 
 def extract_el_version(pkg_name: str) -> str | None:
@@ -189,11 +252,17 @@ class ALBSClient:
         return dest
 
     async def list_build_logs(self, build_id: int) -> list[str]:
-        """Parse the Pulp directory listing for a build's logs."""
+        """Parse the Pulp directory listing for a build's logs.
+
+        Pulp writes the hrefs relative (`href="./mock_build.1.2.log"`), so the
+        leading `./` is stripped: the names are fed straight back into
+        download_log / read_log_* , whose filename whitelist rejects anything
+        carrying a path separator.
+        """
         url = self._log_base_url(build_id) + "/"
         r = await self._http.get(url)
         r.raise_for_status()
-        return re.findall(r'href="([^"]+\.(?:log|cfg))"', r.text)
+        return re.findall(r'href="(?:\./)?([^"/]+\.(?:log|cfg))"', r.text)
 
     async def download_log(self, build_id: int, filename: str) -> Path:
         dest = self._log_path(build_id, filename)
@@ -214,49 +283,191 @@ class ALBSClient:
             raise
         return dest
 
-    def read_log_tail(self, build_id: int, filename: str, lines: int) -> tuple[str, int, int]:
-        """Read last `lines` lines. Returns (content, total_lines, from_line).
-
-        Streams the file once, keeping only the last `lines` lines in memory.
-        mock_build logs can be 100k+ lines / hundreds of MB, so the whole file
-        is never materialized.
-        """
+    def _open_log(self, build_id: int, filename: str) -> Path:
+        """Resolve a downloaded log's path, or raise if it is not on disk yet."""
         path = self._log_path(build_id, filename)
         if not path.exists():
             raise FileNotFoundError(
                 f"Log not downloaded yet. Use download_log first: {filename}"
             )
+        return path
+
+    def read_log_tail(
+        self,
+        build_id: int,
+        filename: str,
+        lines: int,
+        max_line_chars: int = LOG_MAX_LINE_CHARS,
+        before_line: int | None = None,
+        max_chars: int = LOG_MAX_RESULT_CHARS,
+    ) -> tuple[str, int, int, int]:
+        """Read a page of a log, bottom-up. Returns (content, total, first, last).
+
+        With `before_line=None` the page ends at the last line of the file; with
+        `before_line=N` it ends at line N-1, so passing back the `first` line of
+        the previous page walks the log upward one page at a time with no gap
+        and no arithmetic on the caller's side.
+
+        The page holds at most `lines` lines and at most `max_chars` characters
+        (0 lifts the budget), filled from the BOTTOM up — the end of a build log
+        is the interesting end. `first` is the line actually reached, not the one
+        requested, so a page cut short by the budget is continued exactly where
+        it stopped instead of skipping the lines it dropped. Each line is
+        clipped to `max_line_chars` (0 disables).
+
+        Streams the file once, holding at most `lines` lines, so a 100k+ line
+        mock_build log is never materialized.
+        """
+        path = self._open_log(build_id, filename)
+        last_wanted = before_line - 1 if before_line else None
         total = 0
-        tail: deque[str] = deque(maxlen=lines if lines > 0 else 0)
+        window: deque[tuple[int, str]] = deque(maxlen=lines if lines > 0 else 0)
         with open(path, "r", errors="replace") as f:
-            for line in f:
-                total += 1
-                tail.append(line.rstrip("\n"))
-        start = max(0, total - lines)
-        return "\n".join(tail), total, start + 1
+            for lineno, raw in enumerate(f, start=1):
+                total = lineno
+                # Keep counting past the window so `total` is the real length.
+                if last_wanted is not None and lineno > last_wanted:
+                    continue
+                window.append(
+                    (lineno, clip_line(raw.rstrip("\n"), max_line_chars))
+                )
+        _trim_to_budget(window, max_chars)
+        if not window:
+            return "", total, 0, 0
+        return (
+            "\n".join(text for _, text in window),
+            total,
+            window[0][0],
+            window[-1][0],
+        )
 
     def read_log_range(
-        self, build_id: int, filename: str, start_line: int, end_line: int
-    ) -> tuple[str, int]:
-        """Read a specific range. Returns (content, total_lines).
+        self,
+        build_id: int,
+        filename: str,
+        start_line: int,
+        end_line: int,
+        max_line_chars: int = LOG_MAX_LINE_CHARS,
+        max_chars: int = LOG_MAX_RESULT_CHARS,
+    ) -> tuple[str, int, int]:
+        """Read a specific range. Returns (content, total_lines, last_line).
 
-        Streams the file once, collecting only the requested line window
-        instead of materializing the whole file.
+        Reads forward from `start_line`, so a range too large for `max_chars`
+        (0 lifts the budget) stops early and reports `last_line` — the caller
+        continues from `last_line + 1` rather than receiving an oversized result
+        or silently losing the rest. Streams the file once, collecting only the
+        requested window. Each line is clipped to `max_line_chars` (0 disables).
         """
-        path = self._log_path(build_id, filename)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Log not downloaded yet. Use download_log first: {filename}"
-            )
+        path = self._open_log(build_id, filename)
         s = max(0, start_line - 1)
         collected: list[str] = []
+        size = 0
+        last = 0
         total = 0
         with open(path, "r", errors="replace") as f:
             for i, line in enumerate(f):
-                total += 1
-                if s <= i < end_line:
-                    collected.append(line.rstrip("\n"))
-        return "\n".join(collected), total
+                total = i + 1
+                if not (s <= i < end_line):
+                    continue
+                if last and max_chars > 0 and size > max_chars:
+                    continue  # budget spent; keep counting for `total`
+                text = clip_line(line.rstrip("\n"), max_line_chars)
+                collected.append(text)
+                size += len(text) + 1
+                last = i + 1
+        return "\n".join(collected), total, last
+
+    def search_log(
+        self,
+        build_id: int,
+        filename: str,
+        pattern: str,
+        *,
+        before: int = 0,
+        after: int = 0,
+        max_matches: int = LOG_SEARCH_MAX_MATCHES,
+        max_line_chars: int = LOG_MAX_LINE_CHARS,
+        max_chars: int = LOG_MAX_RESULT_CHARS,
+        noise: str | None = LOG_NOISE_PATTERN,
+    ) -> tuple[list[list[LogLine]], int, int, int]:
+        """Grep a log. Returns (hunks, total_matches, total_lines, omitted).
+
+        Each hunk is a run of lines — a match plus its `before` / `after`
+        context — with hunks from neighbouring matches merged. Only the first
+        `max_matches` matches are reported (the first error is the root cause;
+        the rest are cascades), but `total_matches` counts every match in the
+        file so the caller can say the report was capped.
+
+        The regex is applied to the FULL line, then the line is clipped around
+        the match, so a diagnostic hidden inside a multi-KB command line is
+        still found and still visible.
+
+        `noise` is a second regex of boilerplate — compiler invocations,
+        recursive-make chatter — dropped from CONTEXT only; a matching line is
+        always reported. `omitted` counts context lines dropped this way (pass
+        noise=None to keep them). Reporting also stops once `max_chars` is spent
+        (0 lifts the budget), which keeps a pathological pattern from returning
+        an oversized result; `total_matches` still counts what was skipped.
+        Streams the file once; memory is bounded by `before` + the reported hunks.
+        """
+        path = self._open_log(build_id, filename)
+        rx = re.compile(pattern)
+        noise_rx = re.compile(noise) if noise else None
+        hunks: list[list[LogLine]] = []
+        pending: deque[tuple[int, str]] = deque(maxlen=max(0, before))
+        after_left = 0
+        region_end = 0  # last line number covered by the hunk still being built
+        total_matches = 0
+        omitted = 0
+        shown = 0
+        size = 0
+        total = 0
+        with open(path, "r", errors="replace") as f:
+            for lineno, raw in enumerate(f, start=1):
+                total = lineno
+                line = raw.rstrip("\n")
+                match = rx.search(line)
+                if match is not None:
+                    total_matches += 1
+                spent = max_chars > 0 and size >= max_chars
+                if match is not None and shown < max_matches and not spent:
+                    shown += 1
+                    block: list[LogLine] = [
+                        (n, clip_line(t, max_line_chars), False)
+                        for n, t in pending
+                        if lineno - n <= LOG_SEARCH_BEFORE_SPAN
+                    ]
+                    block.append(
+                        (lineno, clip_line(line, max_line_chars, match.start()), True)
+                    )
+                    if hunks and block[0][0] <= region_end + 1:
+                        before_merge = _hunk_size(hunks[-1])
+                        _extend_hunk(hunks[-1], block)
+                        size += _hunk_size(hunks[-1]) - before_merge
+                    else:
+                        hunks.append(block)
+                        size += _hunk_size(block)
+                    pending.clear()
+                    after_left = after
+                    region_end = lineno
+                    continue
+                is_noise = noise_rx is not None and noise_rx.search(line) is not None
+                if after_left > 0:
+                    # Count down over every line, boilerplate included, so the
+                    # window stays a fixed distance from the match instead of
+                    # wandering forward in search of printable lines.
+                    after_left -= 1
+                    region_end = lineno
+                    if is_noise:
+                        omitted += 1
+                        continue
+                    text = clip_line(line, max_line_chars)
+                    _extend_hunk(hunks[-1], [(lineno, text, False)])
+                    size += len(text) + 1
+                    continue
+                if not is_noise:
+                    pending.append((lineno, line))
+        return hunks, total_matches, total, omitted
 
     # ── Authenticated (JWT required) ──────────────────────────────────
 

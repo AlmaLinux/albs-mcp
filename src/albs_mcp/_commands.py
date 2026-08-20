@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -20,7 +21,13 @@ from .client import (
 from .constants import (
     BUILD_TASK_STATUS,
     KEY_LOG_TYPES,
+    LOG_ERROR_PATTERN,
     LOG_LINES_PER_CHUNK,
+    LOG_MAX_LINE_CHARS,
+    LOG_MAX_RESULT_CHARS,
+    LOG_SEARCH_AFTER,
+    LOG_SEARCH_BEFORE,
+    LOG_SEARCH_MAX_MATCHES,
     RELEASE_STATUS,
     SIGN_TASK_STATUS,
 )
@@ -130,6 +137,19 @@ async def get_platforms() -> str:
     return "\n".join(lines)
 
 
+def _task_package(task: dict) -> tuple[str, str]:
+    """``(package name, NVR)`` for one build task.
+
+    The name comes from the dist-git repo URL; the NVR from the tail of
+    ``git_ref`` (``imports/c10s/mingw-glib2-2.89.2-1.el10``). A ref that is a
+    plain branch (``c9s``) carries no version, so the bare name is returned as
+    the NVR too — never a branch name masquerading as a version.
+    """
+    name = task["ref"]["url"].split("/")[-1].replace(".git", "")
+    tail = (task["ref"].get("git_ref") or "").split("/")[-1]
+    return name, tail if tail.startswith(f"{name}-") else name
+
+
 def _format_mock_options(opts: dict | None) -> str:
     """Render an ALBS mock_options dict as a compact one-line summary.
 
@@ -219,7 +239,7 @@ async def get_build_info(build_id: int) -> str:
 
     for t in build["tasks"]:
         status = BUILD_TASK_STATUS.get(t["status"], f"unknown({t['status']})")
-        pkg = t["ref"]["url"].split("/")[-1].replace(".git", "")
+        pkg, _ = _task_package(t)
         git_ref = t["ref"].get("git_ref", "N/A")
         log_count = sum(1 for a in t["artifacts"] if a["type"] == "build_log")
         # Only annotate per-task mock options when they are NOT uniform across
@@ -255,7 +275,7 @@ async def get_failed_tasks(build_id: int) -> str:
     lines = [f"Build #{build_id}: {len(failed)} failed task(s)", ""]
 
     for t in failed:
-        pkg = t["ref"]["url"].split("/")[-1].replace(".git", "")
+        pkg, _ = _task_package(t)
         lines.append(f"Task {t['id']} | arch={t['arch']} | pkg={pkg}")
 
         logs = [a["name"] for a in t["artifacts"] if a["type"] == "build_log"]
@@ -294,19 +314,43 @@ async def read_log_tail(
     build_id: int,
     filename: str,
     lines: int = LOG_LINES_PER_CHUNK,
+    max_line_chars: int = LOG_MAX_LINE_CHARS,
+    before_line: int | None = None,
+    max_chars: int = LOG_MAX_RESULT_CHARS,
 ) -> str:
     client = _get_client()
     try:
-        content, total, from_line = await _read_log(
+        content, total, first, last = await _read_log(
             client, build_id, filename,
-            lambda: client.read_log_tail(build_id, filename, lines),
+            lambda: client.read_log_tail(
+                build_id, filename, lines, max_line_chars,
+                before_line, max_chars,
+            ),
         )
     except Exception as e:
         return _api_error(f"reading log {filename}", e)
-    header = (
-        f"=== {filename} | lines {from_line}-{total} of {total} ===\n"
+    if not content:
+        return (
+            f"=== {filename} | {total:,} lines | nothing before line "
+            f"{before_line} ===\nThis is already the start of the log."
+        )
+    header = f"=== {filename} | lines {first}-{last} of {total:,} ===\n"
+    return header + content + "\n" + _earlier_hint(build_id, filename, first)
+
+
+def _earlier_hint(build_id: int, filename: str, first_line: int) -> str:
+    """Footer telling the caller how to page one screen further up.
+
+    The call is spelled out with the line actually reached, so walking a log
+    upward never needs arithmetic (and a page cut short by the size budget
+    resumes exactly where it stopped instead of skipping what it dropped).
+    """
+    if first_line <= 1:
+        return "↑ start of log."
+    return (
+        f'↑ earlier: read_log_tail({build_id}, "{filename}", '
+        f"before_line={first_line})"
     )
-    return header + content
 
 
 async def read_log_range(
@@ -314,19 +358,81 @@ async def read_log_range(
     filename: str,
     start_line: int,
     end_line: int,
+    max_line_chars: int = LOG_MAX_LINE_CHARS,
+    max_chars: int = LOG_MAX_RESULT_CHARS,
 ) -> str:
     client = _get_client()
     try:
-        content, total = await _read_log(
+        content, total, last = await _read_log(
             client, build_id, filename,
-            lambda: client.read_log_range(build_id, filename, start_line, end_line),
+            lambda: client.read_log_range(
+                build_id, filename, start_line, end_line,
+                max_line_chars, max_chars,
+            ),
         )
     except Exception as e:
         return _api_error(f"reading log {filename}", e)
-    header = (
-        f"=== {filename} | lines {start_line}-{end_line} of {total} ===\n"
-    )
-    return header + content
+    shown_end = min(end_line, total)
+    header = f"=== {filename} | lines {start_line}-{last} of {total:,} ===\n"
+    out = header + content
+    if last and last < shown_end:
+        out += (
+            f"\n↓ size budget reached at line {last}; continue: "
+            f'read_log_range({build_id}, "{filename}", {last + 1}, {shown_end})'
+        )
+    return out
+
+
+async def search_log(
+    build_id: int,
+    filename: str,
+    pattern: str | None = None,
+    before: int = LOG_SEARCH_BEFORE,
+    after: int = LOG_SEARCH_AFTER,
+    max_matches: int = LOG_SEARCH_MAX_MATCHES,
+    max_line_chars: int = LOG_MAX_LINE_CHARS,
+    max_chars: int = LOG_MAX_RESULT_CHARS,
+) -> str:
+    """Grep a build log for a pattern (default: the build-failure signatures)."""
+    client = _get_client()
+    effective = pattern or LOG_ERROR_PATTERN
+    label = pattern if pattern else "<default build-failure signatures>"
+    try:
+        hunks, matches, total, omitted = await _read_log(
+            client, build_id, filename,
+            lambda: client.search_log(
+                build_id, filename, effective,
+                before=before, after=after,
+                max_matches=max_matches, max_line_chars=max_line_chars,
+                max_chars=max_chars,
+            ),
+        )
+    except re.error as e:
+        return f"Error: invalid regex {effective!r}: {e}"
+    except Exception as e:
+        return _api_error(f"searching log {filename}", e)
+
+    shown = sum(1 for hunk in hunks for line in hunk if line[2])
+    summary = f"{matches} match(es)" if matches else "no matches"
+    if matches > shown:
+        summary += f", showing the first {shown}"
+    if omitted:
+        summary += f", {omitted} boilerplate context line(s) omitted"
+    out = [f"=== search {filename} | {label} | {summary} in {total:,} lines ==="]
+    if not matches:
+        out.append(
+            "Nothing matched. Widen the pattern, or read_log_tail the end of "
+            "the log to see how it terminated."
+        )
+        return "\n".join(out)
+    width = len(str(total))
+    for i, hunk in enumerate(hunks):
+        if i:
+            out.append("--")
+        for lineno, text, is_match in hunk:
+            marker = ">>>" if is_match else "   "
+            out.append(f"{marker} {lineno:>{width}} | {text}")
+    return "\n".join(out)
 
 
 async def list_build_logs(build_id: int) -> str:
@@ -361,20 +467,33 @@ async def search_builds(
     lines = [f"Builds (page {page}): {len(builds)} result(s)", ""]
 
     for b in builds[:20]:
-        task_count = len(b.get("tasks", []))
-        failed = sum(1 for t in b.get("tasks", []) if t["status"] == 3)
-        pkgs = set()
-        for t in b.get("tasks", []):
-            name = t["ref"]["url"].split("/")[-1].replace(".git", "")
-            pkgs.add(name)
-        pkg_str = ", ".join(sorted(pkgs)[:3])
-        if len(pkgs) > 3:
-            pkg_str += f" (+{len(pkgs) - 3} more)"
+        tasks = b.get("tasks", [])
+        failed = sum(1 for t in tasks if t["status"] == 3)
+        # NVR per package: a dependency question ("which build carries
+        # mingw-glib2 >= 2.89.2?") cannot be answered from bare names.
+        nvrs: dict[str, str] = {}
+        for t in tasks:
+            name, nvr = _task_package(t)
+            nvrs.setdefault(name, nvr)
         status_str = f"{failed} failed" if failed else "ok"
+        released = "released" if b.get("released") else "unreleased"
         lines.append(
             f"  #{b['id']}  {b['created_at'][:10]}  "
-            f"tasks={task_count} [{status_str}]  {pkg_str}"
+            f"tasks={len(tasks)} [{status_str}] [{released}]"
         )
+        # A build is in a filtered result set because ONE of its packages
+        # matched `project` — that package must never end up hidden behind
+        # "(+N more)", or the search silently answers the wrong question.
+        needle = (project or "").lower()
+        matched = [n for n in sorted(nvrs) if needle and needle in n.lower()]
+        if matched:
+            lines.append(f"      match: {', '.join(nvrs[n] for n in matched)}")
+        rest = [n for n in sorted(nvrs) if n not in set(matched)]
+        if rest:
+            pkg_str = ", ".join(nvrs[n] for n in rest[:3])
+            if len(rest) > 3:
+                pkg_str += f" (+{len(rest) - 3} more)"
+            lines.append(f"      pkgs: {pkg_str}")
 
     return "\n".join(lines)
 

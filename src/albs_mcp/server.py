@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from . import _commands as cmd
 from .constants import (
@@ -14,7 +14,7 @@ from .constants import (
     LOG_SEARCH_MAX_MATCHES,
 )
 
-mcp = FastMCP(
+mcp = MCPServer(
     "albs-mcp",
     instructions="""\
 MCP server for AlmaLinux Build System (build.almalinux.org).

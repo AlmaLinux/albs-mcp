@@ -3,11 +3,12 @@ name: albs-cli
 description: >-
   Use the `albs` CLI to work with AlmaLinux Build System (build.almalinux.org).
   Investigate build failures, create builds, sign packages, create release plans
-  via shell commands. Use whenever the user asks about ALBS builds, build
-  failures, build logs, package building status, or wants to create/sign builds
-  or create a release plan. Also use when the user says "albs", "build failed",
-  "why did the build fail", "build a package", "sign a build", "release plan",
-  or mentions build IDs in the context of AlmaLinux.
+  and AlmaLinux errata (advisories) via shell commands. Use whenever the user
+  asks about ALBS builds, build failures, build logs, package building status,
+  or wants to create/sign builds, create a release plan, or create errata for a
+  CVE/RHSA. Also use when the user says "albs", "build failed", "why did the
+  build fail", "build a package", "sign a build", "release plan", "errata",
+  "advisory", "ALSA", or mentions build IDs in the context of AlmaLinux.
 ---
 
 # ALBS CLI
@@ -34,6 +35,11 @@ albs products                               # list products (release targets)
 albs release-plan RELEASE_ID                # view an existing release plan
 albs create-release-plan BUILD_ID \         # create a release plan (requires JWT)
   --platform NAME --product NAME            #   (never performs the actual release)
+albs errata ERRATA_ID [--platform NAME]     # view an advisory
+albs preview-errata BUILD [BUILD...] \      # preview AlmaLinux advisories (creates nothing)
+  --package NAME --cve CVE [--cve CVE...]   #   (or --rhsa RHSA-...)
+albs create-errata BUILD [BUILD...] \       # create them (requires JWT)
+  --package NAME --cve CVE [--cve CVE...]   #   (--force: despite !! DUPLICATE)
 ```
 
 Authentication: `--token TOKEN` flag or `ALBS_JWT_TOKEN` env var.
@@ -119,11 +125,30 @@ albs create-release-plan 62316 --platform AlmaLinux-8 --product AlmaLinux
 
 The actual release (`albs commit-release`) is intentionally blocked — only plans are supported.
 
+## Creating errata (advisories)
+
+AlmaLinux-issued advisories are `ALSA-YYYY:A001`, `A002`, … — one counter per year for all platforms.
+
+The user gives ONLY: the package or module name (`kernel`, `nodejs:24`) and its CVE(s) — or one RHSA — plus ALBS build IDs or build URLs (a build may contain other packages too). Everything else is automatic — do NOT ask for it: ID, dates (today unless the user names one), title (`<package> security update`), description (package text from the newest earlier advisory for the package + the CVE fix list), CVE information and references (CVE + bugzilla) from Red Hat, module, packages. With `--rhsa`, title, description, CVEs and severity all come from the RHSA.
+
+1. `albs preview-errata BUILD... --package NAME --cve CVE [--cve CVE...]` (or `--rhsa RHSA-...`) — all CVEs and builds in one command; creates nothing. One advisory per platform and package — a build and its retry build merge into one.
+2. Show the preview to the user: IDs, dates, platform, builds, title, severity, module, included and left-out source packages, packages, description source, references, every `NOTE` (a CVE Red Hat does not tie to the package, no earlier advisory to take the package text from). ALWAYS report EVERY failed or cancelled build task (`!!!` banner, `! FAILED` / `! CANCELLED` lines — also printed by `create-errata` and in errors), even when a retry build covers it or the package is left out; when packages are missing from an advisory, ask about a retry build.
+3. If the preview says nothing in a build is affected, ask the user which package it is for and pass `--package NAME`. If it shows `!! DUPLICATE` (an existing advisory on the same platform already covers these CVEs for the same package — e.g. the ALSA imported from the RHSA), tell the user and STOP: `create-errata` refuses it; add `--force` only when the user explicitly wants a second advisory anyway. `NOTE`s about the same CVE in another package's advisory are informational.
+4. ASK the user to confirm, then `albs create-errata` with the same arguments. IDs are re-assigned right before creating — never pick them yourself.
+5. `albs errata ALSA-YYYY:Annn` — confirm it exists (ALBS stores advisories in the background, allow a few seconds; never re-create it). Creating an advisory does not release it.
+
+```bash
+albs preview-errata 54743 54740 54757 --package kernel --cve CVE-2026-31431
+albs create-errata 54743 54740 54757 --package kernel --cve CVE-2026-31431
+albs preview-errata 54740 54757 --rhsa RHSA-2026:13566
+albs errata ALSA-2026:A011
+```
+
 ## Important
 
 - Read-only commands work without authentication.
-- Build/release-plan creation, signing, and sign key listing require a JWT token.
-- `products`, `release-plan` (viewing) are read-only.
+- Build/release-plan/errata creation, signing, and sign key listing require a JWT token.
+- `products`, `release-plan`, `errata`, `preview-errata` are read-only.
 - Build deletion is intentionally blocked.
 - Performing/committing a release is intentionally blocked — only release plans are created, never the actual release.
 - Platform names are case-sensitive (e.g. `AlmaLinux-Kitten-10`). Use `albs platforms` to verify.

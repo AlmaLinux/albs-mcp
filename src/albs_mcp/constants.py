@@ -177,3 +177,51 @@ BETA_PLATFORM_FLAVORS: dict[str, list[str]] = {
     "AlmaLinux-9": ["AlmaLinux-9-beta"],
     "AlmaLinux-10": ["AlmaLinux-10-beta"],
 }
+
+# ── Errata (advisories) ───────────────────────────────────────────────
+
+# Red Hat security data: per-CVE JSON (severity, CVSS, CWE, bugzilla, the
+# packages it affects) and per-advisory CSAF documents (RHSA title, details,
+# CVE list, source packages).
+RH_CVE_API = "https://access.redhat.com/hydra/rest/securitydata/cve"
+RH_CSAF_BASE = "https://security.access.redhat.com/data/csaf/v2/advisories"
+RH_CVE_PAGE = "https://access.redhat.com/security/cve"
+RH_BUGZILLA = "https://bugzilla.redhat.com/show_bug.cgi?id="
+
+CVE_ID_PATTERN = r"CVE-\d{4}-\d{4,}"
+RH_ADVISORY_ID_PATTERN = r"RH[SBE]A-(\d{4}):(\d+)"
+
+# AlmaLinux-issued advisory IDs look like ALSA-2026:A001. The number after
+# "A" is ONE counter per year shared by every platform and advisory type:
+# ALSA-2026:A001 is AlmaLinux-8, A002 AlmaLinux-9, A003 AlmaLinux-10. So the
+# next ID is the highest A-number of the year + 1, whatever the platform.
+ALMA_ERRATA_ID_PATTERN = r"AL[BES]A-(\d{4}):A(\d{3,4})"
+
+# CVE / RHSA input always makes a security advisory.
+ALMA_ERRATA_PREFIX = "ALSA"
+
+# Ascending — the advisory takes the highest severity among its CVEs.
+ERRATA_SEVERITIES = ["Low", "Moderate", "Important", "Critical"]
+
+# RPMs that never go into an advisory (the ALBS UI applies the same rule
+# when it loads packages from a build).
+ERRATA_SKIP_RPM_MARKERS = (".src.", "debuginfo", "debugsource")
+
+RH_ADVISORY_TITLE_PREFIX = "Red Hat Security Advisory: "
+
+# Pages of earlier advisories (10 each, newest first) searched per platform
+# for a package's description ("The kernel packages contain ...").
+ERRATA_INTRO_SEARCH_PAGES = 3
+
+ERRATA_DESCRIPTION_FOOTER = (
+    "For more details about the security issue(s), including the impact, "
+    "a CVSS score, acknowledgments, and other related information, refer to "
+    "the CVE page(s) listed in the References section."
+)
+
+# Red Hat branding in RHSA text → AlmaLinux. Mirrors the albs-web-server
+# debrand_description_and_title() rules that matter for advisory details.
+ERRATA_DEBRAND_PATTERNS = [
+    (r"(?is)Red\s?hat(\s+Enterprise(\s+Linux)(\s+\d+(\.\d+)?)?)?", "AlmaLinux"),
+    (r"\bRHEL\b", "AlmaLinux"),
+]

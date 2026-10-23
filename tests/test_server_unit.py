@@ -37,6 +37,10 @@ from albs_mcp.server import (
     create_release_plan,
     commit_release,
     release_plan,
+    get_errata,
+    preview_errata,
+    create_errata,
+    new_errata,
 )
 
 
@@ -1372,3 +1376,1139 @@ async def test_release_plan_prompt_renders_via_server():
     msg = result.messages[0]
     assert msg.role == "user"
     assert "52679" in msg.content.text
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Errata
+# ═══════════════════════════════════════════════════════════════════════
+
+AL8 = (1, "AlmaLinux-8")
+AL9 = (9, "AlmaLinux-9")
+AL10 = (50, "AlmaLinux-10")
+
+
+def _rpm(name, version, release, arch, epoch="0", meta=True):
+    return {
+        "name": f"{name}-{version}-{release}.{arch}.rpm",
+        "type": "rpm",
+        "meta": {
+            "name": name, "epoch": epoch, "version": version,
+            "release": release, "arch": arch,
+        } if meta else None,
+    }
+
+
+def _task(task_id, arch, repo, status=2, platform=AL8, artifacts=(),
+          modules=(), git_ref="changed/a8/x"):
+    return {
+        "id": task_id, "arch": arch, "status": status,
+        "platform": {"id": platform[0], "name": platform[1]},
+        "ref": {
+            "url": f"https://git.almalinux.org/rpms/{repo}.git",
+            "git_ref": git_ref,
+        },
+        "rpm_modules": [{"name": n, "stream": s} for n, s in modules],
+        "artifacts": list(artifacts),
+    }
+
+
+def _kernel_build(build_id, platform=AL8, arches=("x86_64", "aarch64"),
+                  failed=(), with_kmod=True, kmod_status=2):
+    """kernel (affected) + kmod-foo (not affected) for one platform.
+
+    kernel-doc is noarch: built on every arch, metadata on the first copy
+    only — the way ALBS reports it.
+    """
+    tasks = []
+    for i, arch in enumerate(arches):
+        status = 3 if arch in failed else 2
+        artifacts = [] if status == 3 else [
+            {"name": "kernel-5.14.0-1.el8.src.rpm", "type": "rpm", "meta": None},
+            _rpm("kernel", "5.14.0", "1.el8", arch),
+            _rpm("kernel-core", "5.14.0", "1.el8", arch),
+            _rpm("kernel-debuginfo", "5.14.0", "1.el8", arch),
+            _rpm("kernel-debugsource", "5.14.0", "1.el8", arch),
+            _rpm("kernel-doc", "5.14.0", "1.el8", "noarch", meta=(i == 0)),
+            {"name": "mock_build.1.log", "type": "build_log", "meta": None},
+        ]
+        tasks.append(
+            _task(build_id * 10 + i, arch, "kernel", status, platform, artifacts)
+        )
+    if with_kmod:
+        tasks.append(_task(build_id * 10 + 9, "x86_64", "kmod-foo", kmod_status,
+                           platform, [
+            {"name": "kmod-foo-1.0-1.el8.src.rpm", "type": "rpm", "meta": None},
+            _rpm("kmod-foo", "1.0", "1.el8", "x86_64"),
+        ] if kmod_status == 2 else []))
+    return {"id": build_id, "tasks": tasks}
+
+
+def _nodejs_module_build(build_id):
+    modules = [("nodejs", "24"), ("nodejs-devel", "24")]
+    release = "1.module_el8.10.0+4325+63556250.alma.1"
+    return {"id": build_id, "tasks": [
+        _task(build_id * 10, "src", "nodejs", 2, AL8, [
+            {"name": f"nodejs-24.21.0-{release}.src.rpm", "type": "rpm",
+             "meta": None},
+        ], git_ref="a8-stream-24"),
+        _task(build_id * 10 + 1, "x86_64", "nodejs", 2, AL8, [
+            _rpm("nodejs", "24.21.0", release, "x86_64", epoch="1"),
+            _rpm("nodejs-devel", "24.21.0", release, "x86_64", epoch="1"),
+            _rpm("v8-13.6-devel", "13.6.233.17", release, "x86_64", epoch="3"),
+        ], modules=modules, git_ref="a8-stream-24"),
+        _task(build_id * 10 + 2, "i686", "nodejs", 4, AL8, [],
+              modules=modules, git_ref="a8-stream-24"),
+    ]}
+
+
+ERRATA_BUILDS = {
+    60001: _kernel_build(60001, AL8),
+    60002: _kernel_build(60002, AL10, arches=("x86_64", "aarch64"),
+                         failed=("aarch64",), with_kmod=False),
+    60003: _kernel_build(60003, AL10, arches=("aarch64",), with_kmod=False),
+    60004: _kernel_build(60004, AL9),
+    60005: _nodejs_module_build(60005),
+    60006: {"id": 60006, "tasks": [
+        _task(600061, "x86_64", "kernel", 1, AL8),
+    ]},
+    60008: _kernel_build(60008, AL8, kmod_status=3),
+    60009: _kernel_build(60009, AL8, arches=("x86_64",), failed=("x86_64",),
+                         with_kmod=False),
+    60010: _kernel_build(60010, AL9, kmod_status=5),
+    60007: {"id": 60007, "tasks": [
+        _task(600071, "x86_64", "kernel", 2, AL8, [
+            _rpm("kernel", "5.14.0", "1.el8", "x86_64"),
+            _rpm("kernel-doc", "5.14.0", "1.el8", "noarch", meta=False),
+        ]),
+    ]},
+}
+
+RH_CVE_KERNEL = {
+    "name": "CVE-2026-31431",
+    "threat_severity": "Important",
+    "public_date": "2026-04-22T00:00:00Z",
+    "bugzilla": {
+        "description": "kernel: crypto: algif_aead - Revert to operating out-of-place",
+        "id": "2460538",
+        "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2460538",
+    },
+    "cvss3": {
+        "cvss3_scoring_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    },
+    "cwe": "CWE-1288",
+    "package_state": [
+        {"package_name": "kernel-rt"},
+        {"package_name": "rhel9/some-container"},
+    ],
+    "affected_release": [{"package": "kernel-0:6.12.0-124.55.1.el10_1"}],
+}
+
+RH_CVE_LOW = {
+    "name": "CVE-2026-11111",
+    "threat_severity": "Low",
+    "public_date": "2026-01-01T00:00:00Z",
+    "bugzilla": {"description": "kernel: minor thing", "id": "2000001",
+                 "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2000001"},
+    "package_state": [{"package_name": "kernel"}],
+}
+
+RH_CVE_NODEJS = {
+    "name": "CVE-2026-19534",
+    "threat_severity": "Important",
+    "public_date": "2026-09-04T17:10:05Z",
+    "bugzilla": {"description": "undici: Denial of Service", "id": "2528759",
+                 "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2528759"},
+    "package_state": [{"package_name": "nodejs:26/nodejs"}],
+    "affected_release": [
+        {"package": "nodejs:24-8100020260921144227.6d880403"},
+    ],
+}
+
+RH_CSAF_KERNEL = {
+    "document": {
+        "tracking": {"id": "RHSA-2026:13566"},
+        "title": "Red Hat Security Advisory: kernel security and bug fix update",
+        "aggregate_severity": {"text": "Important"},
+        "notes": [
+            {"category": "summary",
+             "text": "An update for kernel is now available."},
+            {"category": "general",
+             "text": "The kernel packages contain the Linux kernel.\n\n"
+                     "Security Fix(es):\n\n"
+                     "* kernel: nfsd: fix heap overflow on Red Hat Enterprise "
+                     "Linux 10 (CVE-2026-31402)"},
+        ],
+    },
+    "product_tree": {"branches": [{"branches": [
+        {"product": {"product_identification_helper": {
+            "purl": "pkg:rpm/redhat/kernel@6.12.0-124.55.1.el10_1?arch=src"}}},
+        {"product": {"product_identification_helper": {
+            "purl": "pkg:rpm/redhat/kernel@6.12.0-124.55.1.el10_1?arch=x86_64"}}},
+    ]}]},
+    "vulnerabilities": [
+        {
+            "cve": "CVE-2026-31402",
+            "cwe": {"id": "CWE-787"},
+            "release_date": "2026-04-03T00:00:00+00:00",
+            "title": "kernel: nfsd: fix heap overflow",
+            "ids": [{"system_name": "Red Hat Bugzilla ID", "text": "2454844"}],
+            "references": [{
+                "summary": "RHBZ#2454844",
+                "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2454844",
+            }],
+            "scores": [{"cvss_v3": {"vectorString": "CVSS:3.1/AV:L/AC:L"}}],
+            "threats": [{"category": "impact", "details": "Important"}],
+        },
+        {
+            "cve": "CVE-2026-23270",
+            "release_date": "2026-03-18T00:00:00+00:00",
+            "title": "kernel: act_ct use-after-free",
+            "threats": [{"category": "impact", "details": "Moderate"}],
+        },
+    ],
+}
+
+def _earlier(errata_id, platform_id, title, description):
+    return {"id": errata_id, "platform_id": platform_id,
+            "original_title": title, "title": None, "description": None,
+            "original_description": description}
+
+
+# Newest first, as /errata/query/ returns them.
+EARLIER_ADVISORIES = [
+    # Bug fix advisory: no "Security Fix(es):" list, so no package text.
+    _earlier("ALBA-2026:9001", 1, "Moderate: kernel bug fix update",
+             "For detailed information see the AlmaLinux Release Notes."),
+    # kernel-rt contains "kernel" but is a different package.
+    _earlier("ALSA-2026:9000", 1, "Important: kernel-rt security update",
+             "The kernel-rt packages provide the Real Time Linux Kernel.\n\n"
+             "Security Fix(es):\n\n* kernel: x (CVE-2026-1)"),
+    _earlier("ALSA-2026:8999", 1,
+             "Important: kernel security, bug fix, and enhancement update",
+             "The kernel packages contain the Linux kernel.  \n\n"
+             "Security Fix(es):\n\n* kernel: y (CVE-2026-2)"),
+    _earlier("ALSA-2026:8998", 9, "Important: kernel security update",
+             "The AL9 kernel packages.\n\nSecurity Fix(es):\n\n* z"),
+    # Another stream of the nodejs module.
+    _earlier("ALSA-2026:8997", 1, "Important: nodejs:22 security update",
+             "Node.js is a software development platform.\n\n"
+             "Security Fix(es):\n\n* undici: z (CVE-2026-3)"),
+]
+
+ERRATA_RECORD = {
+    "id": "ALSA-2026:A001",
+    "platform_id": 1,
+    "issued_date": "2026-05-01T00:00:00",
+    "updated_date": "2026-05-01T00:00:00",
+    "title": None,
+    "original_title": "Important: kernel security update",
+    "description": None,
+    "original_description": "Security Fix(es):\n\n* kernel: thing (CVE-2026-31431)",
+    "module": "",
+    "severity": "Important",
+    "release_status": "released",
+    "references": [
+        {"ref_type": "ErrataReferenceType.cve", "ref_id": "CVE-2026-31431"},
+        {"ref_type": "ErrataReferenceType.bugzilla", "ref_id": "2460538"},
+        {"ref_type": "ErrataReferenceType.self_ref", "ref_id": "ALSA-2026:A001"},
+    ],
+    "packages": [
+        {"name": "kernel", "source_srpm": "kernel",
+         "albs_packages": [{"build_id": 54743}]},
+        {"name": "kernel-core", "source_srpm": "kernel",
+         "albs_packages": [{"build_id": 54743}]},
+    ],
+}
+
+
+@pytest.fixture
+def errata_client(mock_client):
+    cves = {
+        d["name"]: d for d in (RH_CVE_KERNEL, RH_CVE_LOW, RH_CVE_NODEJS)
+    }
+
+    async def get_rh_cve(cve_id):
+        if cve_id not in cves:
+            raise _http_status_error(404)
+        return cves[cve_id]
+
+    mock_client.jwt_token = "token"
+    mock_client.get_build = AsyncMock(side_effect=lambda b: ERRATA_BUILDS[b])
+    mock_client.get_rh_cve = AsyncMock(side_effect=get_rh_cve)
+    mock_client.get_rh_advisory = AsyncMock(return_value=RH_CSAF_KERNEL)
+    mock_client.list_alma_errata_ids = AsyncMock(return_value=[
+        f"ALSA-2026:A{i:03d}" for i in range(1, 11)
+    ] + ["ALBA-2026:A004", "ALSA-2025:A042"])
+    existing = []  # advisories already on ALBS, for the duplicate check
+
+    async def query_errata(errata_id=None, errata_ids=None, platform_id=None,
+                           page=1, title=None, cve_id=None):
+        if cve_id:
+            # Substring match, like the server's SQL LIKE.
+            found = [
+                r for r in existing
+                if any(cve_id.lower() in ref["ref_id"].lower()
+                       for ref in r["references"])
+                and platform_id in (None, r["platform_id"])
+            ]
+            return {"records": found[(page - 1) * 10:page * 10],
+                    "total_records": len(found)}
+        if not title:
+            return {"records": [], "total_records": 0}
+        found = [
+            r for r in EARLIER_ADVISORIES
+            if title in r["original_title"]
+            and platform_id in (None, r["platform_id"])
+        ]
+        return {"records": found[(page - 1) * 10:page * 10],
+                "total_records": len(found)}
+
+    mock_client.query_errata = AsyncMock(side_effect=query_errata)
+    mock_client.existing_advisories = existing
+    mock_client.create_errata = AsyncMock(return_value={"ok": True})
+    mock_client.get_platform_ids = AsyncMock(return_value={
+        "AlmaLinux-8": 1, "AlmaLinux-9": 9, "AlmaLinux-10": 50,
+    })
+    return mock_client
+
+
+def _posted(client) -> list[dict]:
+    return [c.args[0] for c in client.create_errata.call_args_list]
+
+
+# ── preview_errata ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_preview_errata_cve(errata_client):
+    result = await preview_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert "NOTHING has been created" in result
+    # Next free number of the year, shared by every platform and type.
+    assert "ALSA-2026:A011  AlmaLinux-8  build #60001" in result
+    assert "Title: kernel security update" in result
+    assert '"Important: kernel security update"' in result
+    assert "Module: none" in result
+    assert "Source packages: kernel" in result
+    assert "Left out (not affected): kmod-foo" in result
+    # kernel + kernel-core on 2 arches + one noarch kernel-doc; no
+    # src/debuginfo/debugsource, nothing from kmod-foo.
+    assert "Packages: 5 RPM(s) (aarch64, noarch, x86_64)" in result
+    assert "kmod-foo," not in result
+    assert "CVE-2026-31431  Important  CVSS:3.1/AV:L" in result
+    assert "CWE-1288" in result
+    assert "bugzilla 2460538" in result
+    assert (
+        "* kernel: crypto: algif_aead - Revert to operating out-of-place "
+        "(CVE-2026-31431)" in result
+    )
+    errata_client.create_errata.assert_not_called()
+    errata_client.list_alma_errata_ids.assert_awaited_once_with(2026)
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_orders_platforms_and_numbers_sequentially(
+    errata_client,
+):
+    result = await preview_errata(
+        [60004, "https://build.almalinux.org/build/60001/"], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+    )
+    # AlmaLinux-8 first, like ALSA-2026:A001 (8) / A002 (9) / A003 (10).
+    assert result.index("ALSA-2026:A011  AlmaLinux-8") < result.index(
+        "ALSA-2026:A012  AlmaLinux-9"
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_merges_retry_build(errata_client):
+    """A build with a failed arch plus its retry build → ONE advisory."""
+    result = await preview_errata(
+        [60002, 60003], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert "ALSA-2026:A011  AlmaLinux-10  builds #60002, #60003" in result
+    assert "ALSA-2026:A012" not in result
+    assert "Packages: 5 RPM(s) (aarch64, noarch, x86_64)" in result
+    # The failure is still reported even though the retry build covers it.
+    assert "!!! 1 build task(s) FAILED or were CANCELLED" in result
+    assert (
+        "! FAILED: build #60002 kernel aarch64 (task 600021) — rebuilt in "
+        "build #60003; packages taken from there" in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_warns_about_failed_arch(errata_client):
+    result = await preview_errata([60002], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert "!!! 1 build task(s) FAILED or were CANCELLED" in result
+    assert (
+        "! FAILED: build #60002 kernel aarch64 (task 600021) — its packages "
+        "are NOT in the advisory (add the retry build to include them)"
+        in result
+    )
+    assert "Packages: 3 RPM(s) (noarch, x86_64)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_reports_failure_of_left_out_package(errata_client):
+    """A failed task is reported even when its package is not in the advisory."""
+    result = await preview_errata([60008], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert "Left out (not affected): kmod-foo" in result
+    assert "!!! 1 build task(s) FAILED or were CANCELLED" in result
+    assert (
+        "! FAILED: build #60008 kmod-foo x86_64 (task 600089) — not affected, "
+        "left out of the advisory anyway" in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_reports_cancelled_task(errata_client):
+    result = await preview_errata([60010], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert "! CANCELLED: build #60010 kmod-foo x86_64 (task 600109)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_no_failures_no_banner(errata_client):
+    result = await preview_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert "!!!" not in result
+    assert "FAILED" not in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_all_failed_names_the_failures(errata_client):
+    result = await preview_errata([60009], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error")
+    assert "produced no completed binary packages" in result
+    assert "build #60009 kernel x86_64 (task 600090, failed)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_error_still_names_failures(errata_client):
+    """Even when nothing is affected, the failed tasks are reported."""
+    result = await preview_errata([60008], issued_date="2026-10-23", cves=["CVE-2026-19534"])
+    assert result.startswith("Error")
+    assert "none of its source packages" in result
+    assert "build #60008 kmod-foo x86_64 (task 600089, failed)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_modular_build(errata_client):
+    result = await preview_errata([60005], issued_date="2026-10-23", cves=["CVE-2026-19534"])
+    assert "Module: nodejs:24" in result
+    assert "Title: nodejs:24 security update" in result
+    # Every package built for the module, including v8 with its own epoch.
+    assert "Packages: 3 RPM(s) (x86_64)" in result
+    assert "v8-13.6-devel" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_highest_cve_severity_wins(errata_client):
+    result = await preview_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-11111", "CVE-2026-31431"]
+    )
+    assert "Severity: Important" in result
+    assert "CVE-2026-11111  Low" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_rhsa(errata_client):
+    result = await preview_errata([60001], issued_date="2026-10-23", rhsa="rhsa-2026:13566")
+    errata_client.get_rh_advisory.assert_awaited_once_with("RHSA-2026:13566")
+    assert "Source: RHSA-2026:13566" in result
+    # Everything comes from the RHSA — the title too.
+    assert "Title: kernel security and bug fix update" in result
+    assert "Description: details text of RHSA-2026:13566" in result
+    assert not any(
+        c.kwargs.get("title") for c in errata_client.query_errata.await_args_list
+    )
+    assert "Severity: Important" in result
+    # Description is the RHSA details note, debranded.
+    assert "The kernel packages contain the Linux kernel." in result
+    assert "on AlmaLinux (CVE-2026-31402)" in result
+    assert "Red Hat Enterprise Linux" not in result
+    assert "CVE-2026-31402  Important  CVSS:3.1/AV:L/AC:L  CWE-787" in result
+    assert "public 2026-04-03T00:00:00Z" in result
+    assert "CVE-2026-23270  Moderate" in result
+    assert "bugzilla 2454844" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_nothing_affected(errata_client):
+    result = await preview_errata([60005], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error")
+    assert "none of its source packages ['nodejs:24']" in result
+    assert "package=" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_selects_and_names(errata_client):
+    """The named package picks its RPMs out of a build with other packages."""
+    result = await preview_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+        package="kmod-foo",
+    )
+    assert "Source packages: kmod-foo" in result
+    assert "Left out (not affected): kernel" in result
+    assert "Title: kmod-foo security update" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_unknown_package(errata_client):
+    result = await preview_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+        package="no-such-pkg",
+    )
+    assert result.startswith("Error")
+    assert "is package 'no-such-pkg'" in result
+    assert "kmod-foo" in result  # lists what the build does have
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_overrides_title_and_description(errata_client):
+    result = await preview_errata(
+        [60001], issued_date="2026-10-23", updated_date="2026-10-24", cves=["CVE-2026-31431"],
+        title="kernel security and bug fix update", description="Custom text.",
+    )
+    assert "Title: kernel security and bug fix update" in result
+    assert "  Custom text." in result
+    assert "Issued: 2026-10-23  Updated: 2026-10-24" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_running_build(errata_client):
+    result = await preview_errata([60006], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error")
+    assert "still running" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_without_metadata(errata_client):
+    result = await preview_errata([60007], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error")
+    assert "kernel-doc-5.14.0-1.el8.noarch.rpm" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs, needle", [
+    ({}, "exactly one"),
+    ({"cves": ["CVE-2026-31431"], "rhsa": "RHSA-2026:13566"}, "exactly one"),
+    ({"cves": ["CVE-26-1"]}, "invalid CVE"),
+    ({"rhsa": "RHSA-2026"}, "invalid Red Hat advisory"),
+])
+async def test_preview_errata_bad_source(errata_client, kwargs, needle):
+    result = await preview_errata([60001], issued_date="2026-10-23", **kwargs)
+    assert result.startswith("Error")
+    assert needle in result
+    errata_client.get_build.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issued, updated, needle", [
+    ("23/10/2026", None, "YYYY-MM-DD"),
+    ("2026-10-23", "2026-10-22", "before issued_date"),
+])
+async def test_preview_errata_bad_dates(errata_client, issued, updated, needle):
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date=issued,
+        updated_date=updated,
+    )
+    assert result.startswith("Error")
+    assert needle in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_bad_build_ref(errata_client):
+    result = await preview_errata(
+        ["https://example.com/x"], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert result.startswith("Error")
+    assert "not a build ID" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_unknown_cve(errata_client):
+    result = await preview_errata([60001], issued_date="2026-10-23", cves=["CVE-2099-99999"])
+    assert result.startswith("Error")
+    assert "CVE-2099-99999" in result
+    assert "404" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_id_year_follows_issued_date(errata_client):
+    errata_client.list_alma_errata_ids = AsyncMock(return_value=[])
+    result = await preview_errata([60001], issued_date="2027-01-05", cves=["CVE-2026-31431"])
+    errata_client.list_alma_errata_ids.assert_awaited_once_with(2027)
+    assert "ALSA-2027:A001" in result
+
+
+# ── create_errata ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_errata_payload(errata_client):
+    result = await create_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert result.startswith("Created 1 advisory")
+    assert "ALSA-2026:A011  AlmaLinux-8  build #60001" in result
+    assert (
+        "https://build.almalinux.org/errata?id=ALSA-2026:A011&platform_id=1"
+        in result
+    )
+    assert 'get_errata("ALSA-2026:A011")' in result
+    # The IDs are checked for clashes right before creating.
+    errata_client.query_errata.assert_any_await(errata_ids=["ALSA-2026:A011"])
+    [payload] = _posted(errata_client)
+    assert payload["id"] == "ALSA-2026:A011"
+    assert payload["platform_id"] == 1
+    assert payload["issued_date"] == "2026-10-23"
+    assert payload["updated_date"] == "2026-10-23"
+    assert payload["title"] == "kernel security update"
+    assert payload["severity"] == "Important"
+    assert payload["module"] == ""
+    assert payload["devel_module"] is False
+    assert payload["description"] == (
+        "The kernel packages contain the Linux kernel.\n\n"
+        "Security Fix(es):\n\n"
+        "  * kernel: crypto: algif_aead - Revert to operating out-of-place "
+        "(CVE-2026-31431)\n\n"
+        "For more details about the security issue(s), including the impact, "
+        "a CVSS score, acknowledgments, and other related information, refer "
+        "to the CVE page(s) listed in the References section."
+    )
+    assert payload["references"] == [
+        {
+            "href": "https://access.redhat.com/security/cve/CVE-2026-31431",
+            "ref_id": "CVE-2026-31431",
+            "ref_type": "cve",
+            "title": "CVE-2026-31431",
+            "cve": {
+                "id": "CVE-2026-31431",
+                "cvss3": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                "cwe": "CWE-1288",
+                "impact": "Important",
+                "public": "2026-04-22T00:00:00Z",
+            },
+        },
+        {
+            "href": "https://bugzilla.redhat.com/show_bug.cgi?id=2460538",
+            "ref_id": "2460538",
+            "ref_type": "bugzilla",
+        },
+    ]
+    names = sorted((p["name"], p["arch"]) for p in payload["packages"])
+    assert names == [
+        ("kernel", "aarch64"), ("kernel", "x86_64"),
+        ("kernel-core", "aarch64"), ("kernel-core", "x86_64"),
+        ("kernel-doc", "noarch"),
+    ]
+    assert payload["packages"][0] == {
+        "name": "kernel", "epoch": 0, "version": "5.14.0", "release": "1.el8",
+        "arch": "aarch64", "reboot_suggested": False, "build_id": 60001,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_errata_modular_payload(errata_client):
+    await create_errata([60005], issued_date="2026-10-23", cves=["CVE-2026-19534"])
+    [payload] = _posted(errata_client)
+    assert payload["module"] == "nodejs:24"
+    assert payload["title"] == "nodejs:24 security update"
+    epochs = {p["name"]: p["epoch"] for p in payload["packages"]}
+    assert epochs == {"nodejs": 1, "nodejs-devel": 1, "v8-13.6-devel": 3}
+
+
+@pytest.mark.asyncio
+async def test_create_errata_several_builds(errata_client):
+    result = await create_errata(
+        [60001, 60004, 60002, 60003], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    posted = _posted(errata_client)
+    assert [(p["id"], p["platform_id"]) for p in posted] == [
+        ("ALSA-2026:A011", 1), ("ALSA-2026:A012", 9), ("ALSA-2026:A013", 50),
+    ]
+    assert {p["build_id"] for p in posted[2]["packages"]} == {60002, 60003}
+    assert "Created 3 advisory" in result
+    # The covered aarch64 failure of 60002 is still in the creation report.
+    assert "!!! 1 build task(s) FAILED or were CANCELLED" in result
+    assert (
+        "    ! FAILED: build #60002 kernel aarch64 (task 600021) — rebuilt in "
+        "build #60003" in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_errata_requires_token_fails_fast(errata_client):
+    errata_client.jwt_token = None
+    result = await create_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Auth error")
+    errata_client.get_rh_cve.assert_not_called()
+    errata_client.get_build.assert_not_called()
+    errata_client.create_errata.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_errata_id_taken(errata_client):
+    search = errata_client.query_errata.side_effect
+
+    async def query_errata(**kw):
+        if kw.get("errata_ids"):
+            return {"records": [{"id": "ALSA-2026:A011"}], "total_records": 1}
+        return await search(**kw)
+
+    errata_client.query_errata = AsyncMock(side_effect=query_errata)
+    result = await create_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error")
+    assert "ALSA-2026:A011" in result
+    assert "Nothing was created" in result
+    errata_client.create_errata.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_errata_partial_failure(errata_client):
+    errata_client.create_errata = AsyncMock(side_effect=[
+        {"ok": True}, _http_status_error(500), {"ok": True},
+    ])
+    result = await create_errata(
+        [60001, 60004, 60002], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert result.startswith("Error: creating ALSA-2026:A012 failed")
+    assert "HTTP 500" in result
+    assert "Already created: ALSA-2026:A011 (AlmaLinux-8, build #60001)" in result
+    assert "Not attempted: ALSA-2026:A013 (AlmaLinux-10, build #60002)" in result
+    assert errata_client.create_errata.await_count == 2
+    assert (
+        "  ! ALSA-2026:A013: FAILED: build #60002 kernel aarch64 (task 600021)"
+        in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_errata_not_ok(errata_client):
+    errata_client.create_errata = AsyncMock(
+        return_value={"ok": False, "error": "bad module"}
+    )
+    result = await create_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error: creating ALSA-2026:A011 failed: bad module")
+
+
+@pytest.mark.asyncio
+async def test_create_errata_auth_error(errata_client):
+    errata_client.create_errata = AsyncMock(side_effect=_http_status_error(403))
+    result = await create_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
+    assert result.startswith("Error: creating ALSA-2026:A011 failed")
+    assert "not authorized" in result
+
+
+# ── get_errata ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_errata_tool(errata_client):
+    errata_client.query_errata = AsyncMock(return_value={
+        "records": [ERRATA_RECORD], "total_records": 1,
+    })
+    result = await get_errata("alsa-2026:a001")
+    errata_client.query_errata.assert_awaited_once_with(
+        errata_ids=["ALSA-2026:A001"], platform_id=None
+    )
+    assert "Advisory ALSA-2026:A001 — AlmaLinux-8" in result
+    assert "Title: Important: kernel security update" in result
+    assert "Release status: released" in result
+    assert "Issued: 2026-05-01" in result
+    assert (
+        "References: CVE-2026-31431, bugzilla 2460538, self_ref ALSA-2026:A001"
+        in result
+    )
+    assert "Packages: 2 (source: kernel), builds: #54743" in result
+    assert "* kernel: thing (CVE-2026-31431)" in result
+
+
+@pytest.mark.asyncio
+async def test_get_errata_platform_filter(errata_client):
+    errata_client.query_errata = AsyncMock(return_value={
+        "records": [ERRATA_RECORD], "total_records": 1,
+    })
+    await get_errata("ALSA-2026:A001", "AlmaLinux-8")
+    errata_client.query_errata.assert_awaited_once_with(
+        errata_ids=["ALSA-2026:A001"], platform_id=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_errata_unknown_platform(errata_client):
+    result = await get_errata("ALSA-2026:A001", "AlmaLinux-99")
+    assert result.startswith("Error")
+    assert "unknown platform" in result
+    errata_client.query_errata.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_errata_not_found(errata_client):
+    result = await get_errata("ALSA-2026:A099")
+    assert result.startswith("Error")
+    assert "not found" in result
+    assert "retry in a few seconds" in result
+
+
+# ── helpers ───────────────────────────────────────────────────────────
+
+def test_rh_affected_parses_package_forms():
+    names, modules = commands_module._rh_affected(
+        ["kernel", "nodejs:26/nodejs", "rhel9/postgresql-15", None],
+        [
+            "kernel-rt-0:6.12.0-124.55.1.el10_1",
+            "nodejs:22-8100020260928121333.6d880403",
+            "rhdh/rhdh-hub-rhel9:1789554285",
+            "grafana12-4-main-12.4.10-0.2.hum1",
+            None,
+        ],
+    )
+    assert names == {"kernel", "nodejs", "kernel-rt"}
+    assert modules == {"nodejs:26", "nodejs:22"}
+
+
+def test_next_errata_number_counts_only_this_years_alma_ids():
+    ids = ["ALSA-2026:A009", "ALBA-2026:A012", "ALSA-2026:1234",
+           "ALSA-2025:A099"]
+    assert commands_module._next_errata_number(ids, 2026) == 13
+    assert commands_module._next_errata_number([], 2026) == 1
+
+
+def test_parse_build_ref():
+    parse = commands_module._parse_build_ref
+    assert parse(54743) == 54743
+    assert parse("54743") == 54743
+    assert parse("https://build.almalinux.org/build/54743") == 54743
+    assert parse("https://build.almalinux.org/build/54743/") == 54743
+    with pytest.raises(ValueError):
+        parse("build 54743")
+
+
+# ── new_errata (prompt) ───────────────────────────────────────────────
+
+def test_new_errata_prompt_content():
+    text = new_errata("CVE-2026-31431 CVE-2026-43284", "54743 54757", "kernel")
+    assert "for kernel fixing CVE-2026-31431 CVE-2026-43284" in text
+    assert "54743 54757" in text
+    assert 'package="kernel"' in text
+    assert "filled automatically" in text
+    assert "preview_errata" in text
+    assert "create_errata" in text
+    assert "get_errata" in text
+    assert "EVERY failed or cancelled build task" in text
+
+
+@pytest.mark.asyncio
+async def test_new_errata_prompt_registered():
+    prompts = await mcp.list_prompts()
+    by_name = {p.name: p for p in prompts}
+    assert "new_errata" in by_name
+    arg_names = [a.name for a in (by_name["new_errata"].arguments or [])]
+    assert arg_names == ["advisory", "builds", "package"]
+    required = {a.name: a.required for a in by_name["new_errata"].arguments}
+    assert required == {"advisory": True, "builds": True, "package": False}
+
+
+def test_new_errata_prompt_rhsa_without_package():
+    text = new_errata("RHSA-2026:13566", "54740 54757")
+    assert "package=" not in text
+    assert "RHSA-2026:13566" in text
+
+
+@pytest.mark.asyncio
+async def test_new_errata_prompt_renders_via_server():
+    result = await mcp.get_prompt(
+        "new_errata", {"advisory": "RHSA-2026:13566", "builds": "54740"}
+    )
+    assert len(result.messages) == 1
+    assert "RHSA-2026:13566" in result.messages[0].content.text
+
+
+# ── errata: automatic fields ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_preview_errata_dates_default_to_today(errata_client):
+    import datetime as dt
+
+    today = dt.date.today()
+    errata_client.list_alma_errata_ids = AsyncMock(return_value=[])
+    result = await preview_errata([60001], cves=["CVE-2026-31431"])
+    assert f"Issued: {today}  Updated: {today}" in result
+    assert f"ALSA-{today.year}:A001" in result
+    errata_client.list_alma_errata_ids.assert_awaited_once_with(today.year)
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_text_from_earlier_advisory(errata_client):
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], package="kernel",
+        issued_date="2026-10-23",
+    )
+    # Same platform, exact package; the newer bug fix advisory (no fix list)
+    # and kernel-rt are skipped.
+    assert "Description: package text from ALSA-2026:8999 + CVE fix list" in result
+    assert (
+        "  The kernel packages contain the Linux kernel.\n\n"
+        "  Security Fix(es):\n\n"
+        "    * kernel: crypto: algif_aead" in result
+    )
+    assert "Real Time" not in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_text_prefers_same_platform(errata_client):
+    result = await preview_errata(
+        [60004], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "package text from ALSA-2026:8998" in result
+    assert "The AL9 kernel packages." in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_text_any_platform_fallback(errata_client):
+    # No earlier AlmaLinux-10 kernel advisory → the newest one anywhere.
+    result = await preview_errata(
+        [60003], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "package text from ALSA-2026:8999" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_package_text_other_module_stream(errata_client):
+    result = await preview_errata(
+        [60005], cves=["CVE-2026-19534"], package="nodejs",
+        issued_date="2026-10-23",
+    )
+    # "nodejs" selects the nodejs:24 module; the title names the stream.
+    assert "Module: nodejs:24" in result
+    assert "Title: nodejs:24 security update" in result
+    assert "package text from ALSA-2026:8997" in result
+    assert "Node.js is a software development platform." in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_no_earlier_advisory_note(errata_client):
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], package="kmod-foo",
+        issued_date="2026-10-23",
+    )
+    assert (
+        "NOTE: no earlier security advisory found for kmod-foo, so there is "
+        "no package text — pass description=... to add it" in result
+    )
+    assert "Description:\n  Security Fix(es):" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_several_cves_one_advisory(errata_client):
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431", "CVE-2026-11111"], package="kernel",
+        issued_date="2026-10-23",
+    )
+    assert "Errata preview: 1 advisory(ies)" in result
+    # One fix per line, two-space indent, no blank line between them
+    # (the preview indents the whole description by two more spaces).
+    assert (
+        "    * kernel: crypto: algif_aead - Revert to operating out-of-place "
+        "(CVE-2026-31431)\n"
+        "    * kernel: minor thing (CVE-2026-11111)\n\n"
+        "  For more details" in result
+    )
+    assert "bugzilla 2460538" in result
+    assert "bugzilla 2000001" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_notes_cve_not_tied_to_package(errata_client):
+    result = await preview_errata(
+        [60005], cves=["CVE-2026-19534", "CVE-2026-31431"], package="nodejs:24",
+        issued_date="2026-10-23",
+    )
+    assert (
+        "NOTE: Red Hat does not list nodejs:24 as affected by CVE-2026-31431"
+        in result
+    )
+    assert "affected by CVE-2026-19534" not in result
+
+
+def test_cve_from_rh_ignores_not_affected_states():
+    info = commands_module._cve_from_rh({
+        **RH_CVE_LOW,
+        "package_state": [
+            {"package_name": "kernel", "fix_state": "Not affected"},
+            {"package_name": "kernel-rt", "fix_state": "Affected"},
+        ],
+    })
+    assert info["packages"] == {"kernel-rt"}
+
+
+def test_title_subjects():
+    subjects = commands_module._title_subjects
+    assert subjects("Important: kernel security update") == ["kernel"]
+    assert subjects(
+        "Important: nodejs:24 security, bug fix, and enhancement update"
+    ) == ["nodejs:24"]
+    assert subjects("Moderate: python3.11 and python3.12 security update") == [
+        "python3.11", "python3.12",
+    ]
+    assert subjects("Low: a, b, and c bug fix update") == ["a", "b", "c"]
+
+
+def test_description_intro():
+    intro = commands_module._description_intro
+    assert intro(
+        "The kernel packages contain the Linux kernel.  \n\n"
+        "Security Fix(es):\n\n* x"
+    ) == "The kernel packages contain the Linux kernel."
+    assert intro("For detailed information see the Release Notes.") is None
+    assert intro("Security Fix(es):\n\n* x") is None
+    assert intro(None) is None
+
+
+# ── errata: duplicate check ───────────────────────────────────────────
+
+def _existing(errata_id, platform_id, title, cves, source="kernel", module=""):
+    return {
+        "id": errata_id, "platform_id": platform_id, "original_title": title,
+        "title": None, "module": module,
+        "references": [
+            {"ref_type": "ErrataReferenceType.cve", "ref_id": c} for c in cves
+        ],
+        "packages": [{"name": source, "source_srpm": source}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_flags_duplicate(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:16195", 1, "Important: kernel security update",
+        ["cve-2026-31431"],  # stored lower-case — still the same CVE
+    ))
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "!! DUPLICATE: 1 advisory(ies) here would repeat existing ones" in result
+    assert (
+        '  !! DUPLICATE: ALSA-2026:16195 "Important: kernel security update" '
+        "already covers CVE-2026-31431 for kernel on AlmaLinux-8" in result
+    )
+    errata_client.query_errata.assert_any_await(
+        cve_id="CVE-2026-31431", platform_id=1, page=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_same_cve_other_package_is_a_note(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:16196", 1, "Important: kernel-rt security update",
+        ["CVE-2026-31431"], source="kernel-rt",
+    ))
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "DUPLICATE" not in result
+    assert (
+        '  NOTE: CVE-2026-31431 also in ALSA-2026:16196 "Important: kernel-rt '
+        'security update" (another package on AlmaLinux-8)' in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_other_module_stream_is_not_duplicate(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:87080", 1, "Important: nodejs:22 security update",
+        ["CVE-2026-19534"], source="nodejs", module="nodejs:22",
+    ))
+    result = await preview_errata(
+        [60005], cves=["CVE-2026-19534"], issued_date="2026-10-23"
+    )
+    assert "DUPLICATE" not in result
+    assert "also in ALSA-2026:87080" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_duplicate_ignores_cve_substring_and_platform(
+    errata_client,
+):
+    errata_client.existing_advisories.extend([
+        # CVE-2026-314310 contains CVE-2026-31431 but is another CVE.
+        _existing("ALSA-2026:1", 1, "Important: kernel security update",
+                  ["CVE-2026-314310"]),
+        # Same CVE and package, but AlmaLinux-9.
+        _existing("ALSA-2026:2", 9, "Important: kernel security update",
+                  ["CVE-2026-31431"]),
+    ])
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "DUPLICATE" not in result
+    assert "ALSA-2026:1 " not in result
+    assert "ALSA-2026:2 " not in result
+
+
+@pytest.mark.asyncio
+async def test_create_errata_refuses_duplicate(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:16195", 1, "Important: kernel security update",
+        ["CVE-2026-31431"],
+    ))
+    result = await create_errata(
+        [60001, 60002], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert result.startswith(
+        "Error: nothing was created — these advisories would duplicate"
+    )
+    assert "ALSA-2026:A011 (AlmaLinux-8, build #60001):" in result
+    assert "ALSA-2026:16195" in result
+    assert "force=True" in result
+    # The failed build task of 60002 is reported in the error as well.
+    assert "! ALSA-2026:A012: FAILED: build #60002 kernel aarch64" in result
+    errata_client.create_errata.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_errata_force_creates_duplicate(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:16195", 1, "Important: kernel security update",
+        ["CVE-2026-31431"],
+    ))
+    result = await create_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23", force=True
+    )
+    assert result.startswith("Created 1 advisory")
+    assert (
+        "!! created despite (force=True): DUPLICATE: ALSA-2026:16195" in result
+    )
+    errata_client.create_errata.assert_awaited_once()
+
+
+def test_normalize_fix_lists():
+    norm = commands_module._normalize_fix_lists
+    assert norm(
+        "Intro.\n\nSecurity Fix(es):\n\n* a (CVE-1)\n\n* b (CVE-2)\n\n"
+        "For more details."
+    ) == (
+        "Intro.\n\nSecurity Fix(es):\n\n  * a (CVE-1)\n  * b (CVE-2)\n\n"
+        "For more details."
+    )
+    # Two lists stay separate paragraphs; already-indented items are kept.
+    assert norm(
+        "Security Fix(es):\n\n  * a\n\nBug Fix(es):\n\n* b\n\n* c"
+    ) == "Security Fix(es):\n\n  * a\n\nBug Fix(es):\n\n  * b\n  * c"
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_rhsa_details_one_fix_per_line(errata_client):
+    csaf = {**RH_CSAF_KERNEL, "document": {**RH_CSAF_KERNEL["document"]}}
+    csaf["document"]["notes"] = [{
+        "category": "general",
+        "text": "The kernel packages.\n\nSecurity Fix(es):\n\n"
+                "* kernel: a (CVE-2026-31402)\n\n* kernel: b (CVE-2026-23270)"
+                "\n\nFor more details.",
+    }]
+    errata_client.get_rh_advisory = AsyncMock(return_value=csaf)
+    await create_errata([60001], rhsa="RHSA-2026:13566", issued_date="2026-10-23")
+    [payload] = _posted(errata_client)
+    assert payload["description"] == (
+        "The kernel packages.\n\nSecurity Fix(es):\n\n"
+        "  * kernel: a (CVE-2026-31402)\n  * kernel: b (CVE-2026-23270)\n\n"
+        "For more details."
+    )

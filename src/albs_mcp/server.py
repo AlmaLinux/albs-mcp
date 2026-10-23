@@ -22,6 +22,8 @@ MCP server for AlmaLinux Build System (build.almalinux.org).
 ## When to use
 - User asks about ALBS builds, build failures, build logs, package building status.
 - User wants to create a new build, sign a build, or investigate why a build failed.
+- User wants to create an AlmaLinux errata / advisory (ALSA-YYYY:Annn) for a CVE \
+or RHSA, or look up an existing one.
 - User mentions build IDs, package names in context of AlmaLinux/ALBS.
 
 ## Investigating build failures (most common workflow)
@@ -123,10 +125,67 @@ is only a plan.
 commit_release — it is intentionally blocked and explains that only plans \
 are supported here.
 
+## Creating errata / advisories (requires JWT token)
+AlmaLinux-issued advisories are numbered ALSA-YYYY:A001, A002, ... — one counter \
+per year shared by all platforms.
+The user gives ONLY:
+- the package or module name the advisory is for (e.g. "kernel", "nodejs:24") \
+and the list of CVEs it fixes (one or more), OR one RHSA;
+- one or more ALBS builds (IDs or build URLs). A build may contain other \
+packages too — only the named package's RPMs go in.
+Everything else is filled automatically — do NOT ask the user for it: the ID, \
+the dates (today, unless the user names a date), the title ("<package> security \
+update"), the description (the package text from the newest earlier advisory \
+for that package + a "Security Fix(es)" list of the CVEs), the CVE information \
+(severity, CVSS, CWE, public date from Red Hat), the references (each CVE and \
+its bugzilla) and the packages. With an RHSA, the title, description, CVEs and \
+severity all come from the RHSA, and the package from its source packages.
+1. Call preview_errata(builds, cves=[...], package="...") — or \
+preview_errata(builds, rhsa="RHSA-...") — with ALL CVEs and ALL builds in one \
+call. It creates nothing. If the user named no package for CVEs, omit package: \
+the package is then picked from Red Hat's affected-package data. One advisory is \
+made per platform and package: builds of the same package on the same platform \
+(a build plus its retry build) merge into one; a build with that package for \
+another platform becomes its own advisory.
+2. Show the user the preview: the proposed IDs, platform, builds, title, \
+severity, dates, module, the source packages included and those left out, the \
+package count, where the description came from, references, and every NOTE. \
+A NOTE that Red Hat does not tie a CVE to the package usually means a wrong \
+CVE ID — ask the user to confirm or fix the CVE list before creating. A NOTE \
+that no earlier advisory has package text means the description is only the \
+fix list — offer to pass description=... with the package text.
+   ALWAYS tell the user about EVERY failed or cancelled build task — the `!!!` \
+banner and each `! FAILED` / `! CANCELLED` line, in the preview, in the \
+create_errata result and in error messages alike. This holds even when a retry \
+build covers the arch or the package is left out of the advisory: never drop, \
+merge away or soften a failure. When a failure leaves packages out of an \
+advisory ("NOT in the advisory"), ask whether a retry build should be added.
+   If the preview reports `!! DUPLICATE` — an existing advisory on the same \
+platform already covers these CVEs for the same package (e.g. the ALSA imported \
+from the RHSA) — tell the user which one and STOP: a second advisory is almost \
+never wanted. create_errata refuses it unless force=True; pass force=True only \
+when the user explicitly says to create it anyway after seeing the duplicate. \
+NOTE lines about the same CVE in another package's advisory (kernel vs \
+kernel-rt, another module stream) are informational.
+3. If preview reports that nothing in a build is affected, ask the user which \
+package the advisory is for and pass it as package="...". A modular build's \
+module stream is set automatically (package "nodejs" or "nodejs:24" on a \
+nodejs:24 module build → module "nodejs:24", title "nodejs:24 security update").
+4. ASK the user to confirm, then call create_errata with exactly the same \
+arguments (plus force=True only in the duplicate case above). Do not pick advisory IDs, dates or severity yourself — create_errata \
+renumbers from the latest ALBS ID right before creating.
+5. ALBS stores new advisories in the background: confirm with \
+get_errata(advisory_id) a few seconds later. If it is not found yet, wait and \
+check again — never call create_errata a second time for it, that would make \
+a duplicate advisory under the next ID. Creating an advisory does not release it.
+6. To look at an existing advisory (e.g. an earlier ALSA-2026:A001 as an \
+example), call get_errata(advisory_id).
+
 ## Important notes
 - Read-only tools work without authentication.
-- Build/release creation, signing, and sign key listing require a JWT token.
-- Product and release viewing (get_products, get_release_plan) are read-only.
+- Build/release/errata creation, signing, and sign key listing require a JWT token.
+- Product, release and errata viewing (get_products, get_release_plan, get_errata, \
+preview_errata) are read-only.
 - Build deletion is intentionally blocked for safety.
 - Committing/performing a release is intentionally blocked — this server \
 only creates release plans, never the actual release.
@@ -339,6 +398,87 @@ async def get_release_plan(release_id: int) -> str:
     return await cmd.get_release_plan(release_id)
 
 
+@mcp.tool()
+async def get_errata(errata_id: str, platform: str | None = None) -> str:
+    """View an existing errata / advisory on ALBS. No authentication required.
+
+    Returns title, severity, release status, issued/updated dates, module,
+    references (CVE, bugzilla), package count with source packages and
+    builds, and the description — for every platform the ID exists on, or
+    only `platform` (e.g. "AlmaLinux-9").
+
+    Use it to confirm an advisory made by create_errata (ALBS stores them in
+    the background, so it can take a few seconds to appear) or to look at an
+    earlier one as an example, e.g. get_errata("ALSA-2026:A001").
+    """
+    return await cmd.get_errata(errata_id, platform)
+
+
+@mcp.tool()
+async def preview_errata(
+    builds: list[int | str],
+    cves: list[str] | None = None,
+    rhsa: str | None = None,
+    package: str | None = None,
+    issued_date: str | None = None,
+    updated_date: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+) -> str:
+    """Preview the AlmaLinux advisories create_errata would create. Creates nothing.
+
+    Call this first and show the result to the user before create_errata.
+    Takes the same arguments as create_errata and runs the same logic, so
+    what it shows is what gets created. Input is just the package (or
+    module), the CVEs — or one RHSA instead — and the build(s); the rest is
+    filled automatically: provisional IDs (ALSA-YYYY:Annn, after the latest
+    AlmaLinux advisory of the year), dates (today), title, description
+    (package text from the newest earlier advisory for the package + the CVE
+    fix list), CVE information and references from Red Hat, the module of a
+    modular build, and the binary packages (no src / debuginfo /
+    debugsource) of the named package only. One advisory per platform and
+    package; a build plus its retry build for the same package merge.
+
+    Every failed or cancelled task of the builds is listed as a `! FAILED` /
+    `! CANCELLED` line under a `!!!` banner — also when a retry build covers
+    the arch or the package is left out. Report every one of them to the user,
+    and every NOTE line.
+
+    Existing advisories on the same platform that already reference the CVEs
+    are looked up: for the same package they are flagged `!! DUPLICATE`
+    (create_errata will refuse unless force=True); for other packages they
+    are NOTE lines.
+
+    Args:
+        builds: ALBS build IDs or build URLs
+                (e.g. [54743, "https://build.almalinux.org/build/54757"]).
+                A build may contain other packages too.
+        cves: CVE IDs the advisory fixes (e.g. ["CVE-2026-31431",
+              "CVE-2026-43284"]). Pass cves OR rhsa, not both.
+        rhsa: One Red Hat advisory (e.g. "RHSA-2026:13566"); its title,
+              description, CVEs and severity are used.
+        package: Package or module name the advisory is for ("kernel",
+                 "nodejs:24" or "nodejs"). Selects that package's RPMs from
+                 the builds and names the title. Default: the packages Red
+                 Hat lists as affected.
+        issued_date: YYYY-MM-DD. Default: today. Its year is the year in
+                     the advisory ID.
+        updated_date: YYYY-MM-DD. Default: issued_date.
+        title: Override the title (without the severity — ALBS prefixes it).
+        description: Override the whole description text.
+    """
+    return await cmd.preview_errata(
+        builds=builds,
+        cves=cves,
+        rhsa=rhsa,
+        package=package,
+        issued_date=issued_date,
+        updated_date=updated_date,
+        title=title,
+        description=description,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  AUTHENTICATED TOOLS  (JWT required)
 # ═══════════════════════════════════════════════════════════════════════
@@ -518,6 +658,58 @@ async def create_release_plan(
 
 
 @mcp.tool()
+async def create_errata(
+    builds: list[int | str],
+    cves: list[str] | None = None,
+    rhsa: str | None = None,
+    package: str | None = None,
+    issued_date: str | None = None,
+    updated_date: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    force: bool = False,
+) -> str:
+    """Create AlmaLinux errata / advisories (ALSA-YYYY:Annn) on ALBS. Requires JWT token.
+
+    Run preview_errata with the same arguments first and get the user's
+    confirmation. IDs are assigned here, right before creating, as the next
+    free AlmaLinux numbers of the issue year (one counter for all
+    platforms), in platform order. Fails without creating anything if an ID
+    is already taken. ALBS stores the advisories in the background — check
+    them with get_errata. Nothing is released. The result repeats every
+    failed / cancelled build task (`! FAILED` lines) — report them to the user.
+
+    Refuses, creating nothing, when an advisory would duplicate an existing
+    one (same platform and package already covered for these CVEs — the
+    `!! DUPLICATE` lines of preview_errata), unless force=True.
+
+    Args:
+        builds: ALBS build IDs or build URLs.
+        cves: CVE IDs the advisory fixes. Pass cves OR rhsa, not both.
+        rhsa: One Red Hat advisory, e.g. "RHSA-2026:13566".
+        package: Package or module name the advisory is for.
+                 Default: the packages Red Hat lists as affected.
+        issued_date: YYYY-MM-DD. Default: today.
+        updated_date: YYYY-MM-DD. Default: issued_date.
+        title: Override the title (without the severity prefix).
+        description: Override the whole description text.
+        force: Create even when preview reported `!! DUPLICATE`. Only when
+               the user explicitly asks for it after seeing the duplicate.
+    """
+    return await cmd.create_errata(
+        builds=builds,
+        cves=cves,
+        rhsa=rhsa,
+        package=package,
+        issued_date=issued_date,
+        updated_date=updated_date,
+        title=title,
+        description=description,
+        force=force,
+    )
+
+
+@mcp.tool()
 async def commit_release(release_id: int) -> str:
     """Commit (perform) a release. CURRENTLY BLOCKED.
 
@@ -601,6 +793,38 @@ def release_plan(build_id: str) -> str:
         "4. Report the plan (status, source packages, target repositories) "
         "and make clear that nothing has been published — it is only a plan. "
         "Never call commit_release."
+    )
+
+
+@mcp.prompt(
+    title="Create AlmaLinux errata",
+    description="Seed the errata workflow for a CVE/RHSA and ALBS build(s).",
+)
+def new_errata(advisory: str, builds: str, package: str = "") -> str:
+    """User-invoked entry point for the errata-creation workflow.
+
+    Thin wrapper: it parameterizes the errata workflow that already lives in
+    the server instructions by the CVE(s)/RHSA, the builds and the package.
+    The rules (everything else is automatic, preview first, report every
+    failure) stay in the instructions and are not duplicated here.
+    """
+    subject = f"for {package} " if package else ""
+    package_arg = f'package="{package}", ' if package else ""
+    return (
+        f"Create AlmaLinux errata {subject}fixing {advisory}, from ALBS "
+        f"build(s): {builds}.\n\n"
+        "Follow the errata workflow from the albs-mcp server instructions:\n"
+        f"1. Call preview_errata with all the builds, {package_arg}and "
+        "cves=[...] for CVE IDs — or rhsa=\"...\" for a Red Hat advisory "
+        "(then everything comes from it). Everything else (ID, dates, title, "
+        "description, CVE info, references, packages) is filled "
+        "automatically.\n"
+        "2. Show me the preview — IDs, platforms, titles, severity, dates, "
+        "module, included and left-out source packages, description source, "
+        "references, NOTEs — and EVERY failed or cancelled build task it "
+        "reports, then wait for my confirmation.\n"
+        "3. Call create_errata with the same arguments, then confirm the "
+        "result with get_errata."
     )
 
 

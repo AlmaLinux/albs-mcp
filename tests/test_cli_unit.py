@@ -615,3 +615,124 @@ def test_commit_release_blocked():
     assert code == 0
     assert "blocked" in out.lower()
     mock.assert_awaited_once_with(4242)
+
+
+# ── errata ────────────────────────────────────────────────────────────
+
+
+def test_errata_subcommands_registered():
+    parser = build_parser()
+    for action in parser._subparsers._group_actions:
+        if hasattr(action, "choices") and action.choices:
+            choices = list(action.choices.keys())
+            break
+    else:
+        choices = []
+    assert "errata" in choices
+    assert "preview-errata" in choices
+    assert "create-errata" in choices
+
+
+def test_errata_view():
+    with patch("albs_mcp._commands.get_errata", new_callable=AsyncMock) as mock:
+        mock.return_value = "Advisory ALSA-2026:A001 — AlmaLinux-8"
+        code, out = _invoke(["errata", "ALSA-2026:A001", "--platform", "AlmaLinux-8"])
+    assert code == 0
+    assert "ALSA-2026:A001" in out
+    mock.assert_awaited_once_with("ALSA-2026:A001", "AlmaLinux-8")
+
+
+def test_preview_errata_cves():
+    with patch(
+        "albs_mcp._commands.preview_errata", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Errata preview: 2 advisory(ies)"
+        code, out = _invoke([
+            "preview-errata", "54743", "https://build.almalinux.org/build/54757",
+            "--package", "kernel",
+            "--cve", "CVE-2026-31431", "--cve", "CVE-2026-11111",
+        ])
+    assert code == 0
+    assert "Errata preview" in out
+    # Only package, CVEs and builds are needed — dates default to today.
+    assert mock.call_args[1] == {
+        "builds": ["54743", "https://build.almalinux.org/build/54757"],
+        "cves": ["CVE-2026-31431", "CVE-2026-11111"],
+        "rhsa": None,
+        "package": "kernel",
+        "issued_date": None,
+        "updated_date": None,
+        "title": None,
+        "description": None,
+    }
+
+
+def test_create_errata_rhsa_with_overrides():
+    with patch(
+        "albs_mcp._commands.create_errata", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Created 1 advisory(ies) on ALBS"
+        code, out = _invoke([
+            "create-errata", "54740", "54757", "--rhsa", "RHSA-2026:13566",
+            "--issued-date", "2026-10-23", "--updated-date", "2026-10-24",
+            "--package", "kernel", "--title", "kernel security update",
+            "--description", "text",
+        ])
+    assert code == 0
+    kw = mock.call_args[1]
+    assert kw["force"] is False
+    assert kw["builds"] == ["54740", "54757"]
+    assert kw["rhsa"] == "RHSA-2026:13566"
+    assert kw["cves"] is None
+    assert kw["issued_date"] == "2026-10-23"
+    assert kw["updated_date"] == "2026-10-24"
+    assert kw["package"] == "kernel"
+    assert kw["title"] == "kernel security update"
+    assert kw["description"] == "text"
+
+
+def test_create_errata_error_exit_code():
+    with patch(
+        "albs_mcp._commands.create_errata", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Auth error: creating errata requires a JWT token."
+        code, _ = _invoke([
+            "create-errata", "54743", "--cve", "CVE-2026-31431",
+            "--issued-date", "2026-10-23",
+        ])
+    assert code == 1
+
+
+@pytest.mark.parametrize("argv", [
+    # --cve and --rhsa are mutually exclusive, one is required
+    ["preview-errata", "54743"],
+    ["preview-errata", "54743",
+     "--cve", "CVE-2026-31431", "--rhsa", "RHSA-2026:13566"],
+    # at least one build
+    ["create-errata", "--cve", "CVE-2026-31431"],
+])
+def test_errata_args_validation(argv):
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(argv)
+    assert exc.value.code == 2
+
+
+def test_create_errata_force():
+    with patch(
+        "albs_mcp._commands.create_errata", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Created 1 advisory(ies) on ALBS"
+        code, _ = _invoke([
+            "create-errata", "94160", "--cve", "CVE-2026-109618", "--force",
+        ])
+    assert code == 0
+    assert mock.call_args[1]["force"] is True
+
+
+def test_preview_errata_has_no_force():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "preview-errata", "94160", "--cve", "CVE-2026-109618", "--force",
+        ])

@@ -164,6 +164,63 @@ def _cmd_commit_release(args: argparse.Namespace) -> None:
     _exec(cmd.commit_release(args.release_id))
 
 
+def _cmd_errata(args: argparse.Namespace) -> None:
+    _exec(cmd.get_errata(args.errata_id, args.platform))
+
+
+def _errata_kwargs(args: argparse.Namespace) -> dict:
+    return {
+        "builds": args.builds,
+        "cves": args.cve or None,
+        "rhsa": args.rhsa,
+        "package": args.package,
+        "issued_date": args.issued_date,
+        "updated_date": args.updated_date,
+        "title": args.title,
+        "description": args.description,
+    }
+
+
+def _cmd_preview_errata(args: argparse.Namespace) -> None:
+    _exec(cmd.preview_errata(**_errata_kwargs(args)))
+
+
+def _cmd_create_errata(args: argparse.Namespace) -> None:
+    _exec(cmd.create_errata(**_errata_kwargs(args), force=args.force))
+
+
+def _add_errata_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("builds", nargs="+", help="ALBS build IDs or build URLs.")
+    p.add_argument(
+        "--package", default=None,
+        help=(
+            'Package or module the advisory is for ("kernel", "nodejs:24"). '
+            "Default: the packages Red Hat lists as affected."
+        ),
+    )
+    p.add_argument(
+        "--issued-date", default=None,
+        help="Issue date, YYYY-MM-DD (default: today).",
+    )
+    p.add_argument(
+        "--updated-date", default=None,
+        help="Update date, YYYY-MM-DD (default: the issued date).",
+    )
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--cve", action="append", default=[],
+        help="CVE the advisory fixes (repeat for multiple).",
+    )
+    source.add_argument(
+        "--rhsa", default=None, help="Red Hat advisory, e.g. RHSA-2026:13566.",
+    )
+    p.add_argument(
+        "--title", default=None,
+        help='Title override (default: "<package> security update").',
+    )
+    p.add_argument("--description", default=None, help="Description override.")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Parser construction
 # ═══════════════════════════════════════════════════════════════════════
@@ -175,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "CLI for AlmaLinux Build System (build.almalinux.org). "
             "Investigate build failures, create builds, sign packages, "
-            "create release plans."
+            "create release plans and errata."
         ),
     )
     parser.add_argument(
@@ -430,6 +487,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("release_id", type=int)
     p.set_defaults(func=_cmd_commit_release)
+
+    # ── errata ────────────────────────────────────────────────────────
+    p = sub.add_parser("errata", help="View an existing errata / advisory.")
+    p.add_argument("errata_id", help="Advisory ID, e.g. ALSA-2026:A001.")
+    p.add_argument(
+        "--platform", default=None,
+        help="Show only this platform's record (e.g. AlmaLinux-9).",
+    )
+    p.set_defaults(func=_cmd_errata)
+
+    # ── preview-errata ────────────────────────────────────────────────
+    p = sub.add_parser(
+        "preview-errata",
+        help="Preview the AlmaLinux advisories create-errata would create.",
+    )
+    _add_errata_args(p)
+    p.set_defaults(func=_cmd_preview_errata)
+
+    # ── create-errata ─────────────────────────────────────────────────
+    p = sub.add_parser(
+        "create-errata",
+        help="Create AlmaLinux advisories (ALSA-YYYY:Annn) (requires JWT).",
+    )
+    _add_errata_args(p)
+    p.add_argument(
+        "--force", action="store_true",
+        help=(
+            "Create even when an existing advisory on the same platform already "
+            "covers these CVEs for the same package (preview: !! DUPLICATE)."
+        ),
+    )
+    p.set_defaults(func=_cmd_create_errata)
 
     return parser
 

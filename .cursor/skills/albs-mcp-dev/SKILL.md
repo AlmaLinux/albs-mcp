@@ -28,14 +28,14 @@ tests/
 After ANY code change — no exceptions — do all of this yourself:
 
 1. **Run unit tests**: `.venv/bin/python -m pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v`
-2. **Run evals**: read `evals/evals.json` from this skill, verify ALL 23 cases against the current code (see "Running evals" below)
+2. **Run evals**: read `evals/evals.json` from this skill, verify ALL 51 cases against the current code (see "Running evals" below)
 3. **Reinstall**: `.venv/bin/python -m pip install -e .`
 
 Never skip evals. Never ask the user to run them. Every change can break agent workflows in non-obvious ways.
 
 ## Running evals
 
-Eval definitions live in [evals/evals.json](evals/evals.json) inside this skill directory — 23 cases across 5 categories.
+Eval definitions live in [evals/evals.json](evals/evals.json) inside this skill directory — 51 cases across 8 categories.
 
 After any code change:
 

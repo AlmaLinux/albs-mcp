@@ -1476,3 +1476,103 @@ def test_get_whole_package_task_ids_all_complete():
         ]
     }
     assert sorted(get_whole_package_task_ids(info)) == [1, 2]
+
+
+# ── errata ────────────────────────────────────────────────────────────
+
+from albs_mcp.constants import RH_CSAF_BASE, RH_CVE_API  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_query_errata_params(client):
+    client._http.get = AsyncMock(return_value=_mock_response(
+        {"records": [], "total_records": 0, "current_page": 2}
+    ))
+    await client.query_errata(
+        errata_id="-2026:A", errata_ids=["ALSA-2026:A001"], platform_id=9,
+        page=2, title="kernel", cve_id="CVE-2026-31431",
+    )
+    args, kwargs = client._http.get.call_args
+    assert args[0] == f"{ALBS_API}/errata/query/"
+    assert kwargs["params"] == {
+        "pageNumber": 2, "id": "-2026:A", "ids": ["ALSA-2026:A001"],
+        "title": "kernel", "cveId": "CVE-2026-31431", "platformId": 9,
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_errata_minimal_params(client):
+    client._http.get = AsyncMock(return_value=_mock_response({"records": []}))
+    await client.query_errata()
+    assert client._http.get.call_args[1]["params"] == {"pageNumber": 1}
+
+
+@pytest.mark.asyncio
+async def test_list_alma_errata_ids_reads_every_page(client):
+    pages = [
+        {"records": [{"id": f"ALSA-2026:A{i:03d}"} for i in range(1, 11)],
+         "total_records": 12},
+        {"records": [{"id": "ALSA-2026:A011"}, {"id": "ALSA-2026:A012"}],
+         "total_records": 12},
+    ]
+    client._http.get = AsyncMock(
+        side_effect=[_mock_response(p) for p in pages]
+    )
+    ids = await client.list_alma_errata_ids(2026)
+    assert len(ids) == 12
+    assert ids[-1] == "ALSA-2026:A012"
+    calls = client._http.get.call_args_list
+    assert [c[1]["params"]["pageNumber"] for c in calls] == [1, 2]
+    assert all(c[1]["params"]["id"] == "-2026:A" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_list_alma_errata_ids_stops_on_empty_page(client):
+    client._http.get = AsyncMock(return_value=_mock_response(
+        {"records": [], "total_records": 0}
+    ))
+    assert await client.list_alma_errata_ids(2027) == []
+    client._http.get.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_rh_cve_url(client):
+    client._http.get = AsyncMock(return_value=_mock_response({"name": "CVE-2026-1"}))
+    data = await client.get_rh_cve("CVE-2026-31431")
+    assert data == {"name": "CVE-2026-1"}
+    client._http.get.assert_called_once_with(f"{RH_CVE_API}/CVE-2026-31431.json")
+
+
+@pytest.mark.asyncio
+async def test_get_rh_advisory_csaf_url(client):
+    client._http.get = AsyncMock(return_value=_mock_response({"document": {}}))
+    await client.get_rh_advisory("RHSA-2026:13566")
+    client._http.get.assert_called_once_with(
+        f"{RH_CSAF_BASE}/2026/rhsa-2026_13566.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_rh_advisory_rejects_bad_id(client):
+    client._http.get = AsyncMock()
+    with pytest.raises(ValueError):
+        await client.get_rh_advisory("RHSA-2026:13566/../x")
+    client._http.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_errata_posts_with_auth(client):
+    client._http.post = AsyncMock(return_value=_mock_response({"ok": True}))
+    record = {"id": "ALSA-2026:A011", "platform_id": 1}
+    result = await client.create_errata(record)
+    assert result == {"ok": True}
+    args, kwargs = client._http.post.call_args
+    assert args[0] == f"{ALBS_API}/errata/new/"
+    assert kwargs["json"] == record
+    assert kwargs["headers"] == {"authorization": "Bearer test-token-123"}
+
+
+@pytest.mark.asyncio
+async def test_create_errata_no_token(client_no_token):
+    with pytest.raises(PermissionError):
+        await client_no_token.create_errata({"id": "ALSA-2026:A011"})

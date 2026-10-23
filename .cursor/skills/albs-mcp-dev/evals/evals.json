@@ -499,6 +499,177 @@
         "The agent does NOT report the package as never built while a listed build carries a matching NVR"
       ],
       "files": []
+    },
+    {
+      "id": 39,
+      "name": "errata_fills_everything_else",
+      "category": "errata",
+      "prompt": "Create errata for kernel, CVE-2026-31431, build https://build.almalinux.org/build/54743",
+      "expected_output": "Agent calls preview_errata(builds=[54743 or the URL], cves=['CVE-2026-31431'], package='kernel') right away — it does NOT ask for the date, ID, title, description, severity, references or packages, which are filled automatically (dates default to today). It shows the preview and does NOT call create_errata before the user confirms.",
+      "criteria": [
+        "The agent calls preview_errata with package='kernel', cves=['CVE-2026-31431'] and the build",
+        "The agent does NOT ask the user for the date, ID, title, description, severity, references or package list",
+        "The agent does NOT call create_errata before the user confirms the preview"
+      ],
+      "files": []
+    },
+    {
+      "id": 40,
+      "name": "errata_preview_then_create",
+      "category": "errata",
+      "prompt": "Make errata for CVE-2026-31431, builds 54743 and https://build.almalinux.org/build/54757, issued 2026-10-23.",
+      "expected_output": "Agent calls preview_errata(builds=[54743, 54757 or the URL], issued_date='2026-10-23', cves=['CVE-2026-31431']) in ONE call, shows the user the proposed IDs, platforms, titles, severity, module, included/left-out source packages, references and warnings, and asks for confirmation. Only after confirmation calls create_errata with the same arguments. It does not choose IDs or severity itself.",
+      "criteria": [
+        "The agent calls preview_errata before create_errata",
+        "Both builds go into a single preview_errata call (builds list), with issued_date='2026-10-23' and cves=['CVE-2026-31431']",
+        "The agent shows the preview and asks for confirmation before calling create_errata",
+        "The agent does NOT pass or invent advisory IDs or a severity — they come from the tools"
+      ],
+      "files": []
+    },
+    {
+      "id": 41,
+      "name": "errata_from_rhsa",
+      "category": "tool_selection",
+      "prompt": "We need AlmaLinux advisories for RHSA-2026:13566 from builds 54740 and 54757, dated 2026-10-23. Show me what would be created.",
+      "expected_output": "Agent calls preview_errata with rhsa='RHSA-2026:13566' (not cves), builds=[54740, 54757], issued_date='2026-10-23'. Does NOT call create_errata (the user asked to see, not create).",
+      "criteria": [
+        "The agent calls preview_errata with rhsa='RHSA-2026:13566'",
+        "The agent does NOT also pass cves alongside rhsa",
+        "The agent does NOT call create_errata",
+        "The agent does NOT pass package, title or description — with an RHSA they come from the RHSA"
+      ],
+      "files": []
+    },
+    {
+      "id": 42,
+      "name": "route_view_errata",
+      "category": "tool_selection",
+      "prompt": "Show me ALSA-2026:A001 — I want to use it as an example.",
+      "expected_output": "Agent calls get_errata('ALSA-2026:A001') and reports its title, severity, references, packages. Does NOT call preview_errata or create_errata.",
+      "criteria": [
+        "The agent calls get_errata with errata_id='ALSA-2026:A001'",
+        "The agent does NOT call preview_errata or create_errata"
+      ],
+      "files": []
+    },
+    {
+      "id": 43,
+      "name": "errata_nothing_affected",
+      "category": "error_handling",
+      "prompt": "preview_errata says: \"Error: build #60001 (AlmaLinux-8): none of its source packages ['kmod-foo'] is affected by CVE-2026-31431 according to Red Hat (affected: kernel, kernel-rt). Name the package (or module) explicitly with package=...\" What now?",
+      "expected_output": "Agent explains that Red Hat data does not list kmod-foo as affected, asks the user which package the advisory is for (kmod-foo really fixing this CVE, or a different build meant), and only on confirmation re-runs preview_errata with package='kmod-foo'. It does NOT call create_errata directly.",
+      "criteria": [
+        "The agent explains why nothing was selected (the source package is not in Red Hat's affected list)",
+        "The agent asks the user before overriding, and the override passes package='kmod-foo' to preview_errata",
+        "The agent does NOT call create_errata without a successful, confirmed preview"
+      ],
+      "files": []
+    },
+    {
+      "id": 44,
+      "name": "errata_failed_arch_warning",
+      "category": "errata",
+      "prompt": "The errata preview for build 54740 shows \"! FAILED: build #54740 kernel aarch64 (task 411949) — its packages are NOT in the advisory (add the retry build to include them)\". Go ahead and create it.",
+      "expected_output": "Agent does not create immediately: it tells the user that build 54740's kernel aarch64 task failed and that aarch64 packages would be missing, and asks whether there is a retry build to add (e.g. one that rebuilt aarch64). It creates only after the user confirms — either with the retry build added to builds (then previewing again) or explicitly accepting the missing arch.",
+      "criteria": [
+        "The agent tells the user that the aarch64 task of build 54740 FAILED and that aarch64 packages would be missing",
+        "The agent asks about a retry build (to pass in builds together with 54740) or for explicit confirmation to proceed without aarch64",
+        "The agent does NOT silently call create_errata ignoring the failure"
+      ],
+      "files": []
+    },
+    {
+      "id": 45,
+      "name": "errata_verify_after_create",
+      "category": "errata",
+      "prompt": "create_errata said ALSA-2026:A011 was created, but get_errata says it is not found. Did it fail? Should I create it again?",
+      "expected_output": "Agent explains that ALBS stores new advisories in the background, so the record can take a few seconds to appear; it retries get_errata('ALSA-2026:A011') after a short wait instead of calling create_errata again (which would make a duplicate advisory under a new ID).",
+      "criteria": [
+        "The agent explains that advisory creation on ALBS is asynchronous",
+        "The agent re-checks with get_errata rather than calling create_errata again",
+        "The agent does NOT create a second advisory"
+      ],
+      "files": []
+    },
+    {
+      "id": 46,
+      "name": "prompt_new_errata",
+      "category": "prompt",
+      "prompt": "Create AlmaLinux errata for kernel fixing CVE-2026-31431, from ALBS build(s): 54743 54757.\n\nFollow the errata workflow from the albs-mcp server instructions:\n1. Call preview_errata with all the builds, package=\"kernel\", and cves=[...] for CVE IDs — or rhsa=\"...\" for a Red Hat advisory (then everything comes from it). Everything else (ID, dates, title, description, CVE info, references, packages) is filled automatically.\n2. Show me the preview — IDs, platforms, titles, severity, dates, module, included and left-out source packages, description source, references, NOTEs — and EVERY failed or cancelled build task it reports, then wait for my confirmation.\n3. Call create_errata with the same arguments, then confirm the result with get_errata.",
+      "expected_output": "Agent calls preview_errata(builds=[54743, 54757], package='kernel', cves=['CVE-2026-31431']) without asking for dates or other fields, shows it (including every failed build task), waits for confirmation, then create_errata with the same arguments and get_errata to verify.",
+      "criteria": [
+        "The agent calls preview_errata with builds=[54743, 54757], package='kernel' and cves=['CVE-2026-31431'] without first asking for a date or other fields",
+        "The agent reports every failed or cancelled build task the preview lists",
+        "create_errata is called only after the user confirms the preview, with the same arguments",
+        "The agent verifies the result with get_errata"
+      ],
+      "files": []
+    },
+    {
+      "id": 47,
+      "name": "errata_always_reports_failures",
+      "category": "errata",
+      "prompt": "Preview errata for CVE-2026-31431, builds 54740 and 54757, issued 2026-10-23. Just give me a short summary.",
+      "expected_output": "Agent calls preview_errata(builds=[54740, 54757], issued_date='2026-10-23', cves=['CVE-2026-31431']). Even in a short summary it states that build 54740's kernel aarch64 task (411949) FAILED and was rebuilt in 54757 — the `!!!` banner / `! FAILED` line is never dropped just because the retry build covers it or the user asked for brevity.",
+      "criteria": [
+        "The agent calls preview_errata with both builds in one call",
+        "The agent's summary explicitly mentions the failed aarch64 task of build 54740",
+        "The agent says the failure was covered by the retry build 54757 (aarch64 packages come from there) rather than omitting it"
+      ],
+      "files": []
+    },
+    {
+      "id": 48,
+      "name": "errata_several_cves_one_advisory",
+      "category": "errata",
+      "prompt": "New advisory for openssl: CVE-2026-1111, CVE-2026-2222 and CVE-2026-3333. Build 60001 — it also has other packages in it.",
+      "expected_output": "Agent makes ONE preview_errata call with package='openssl', cves=['CVE-2026-1111', 'CVE-2026-2222', 'CVE-2026-3333'] and builds=[60001] — one advisory listing all three CVEs, not one advisory per CVE. It relies on package to leave the build's other packages out.",
+      "criteria": [
+        "The agent calls preview_errata once with all three CVEs in cves",
+        "package='openssl' is passed so only openssl's RPMs go in",
+        "The agent does NOT create separate advisories per CVE"
+      ],
+      "files": []
+    },
+    {
+      "id": 49,
+      "name": "errata_cve_not_tied_to_package",
+      "category": "error_handling",
+      "prompt": "The errata preview shows \"NOTE: Red Hat does not list nodejs:24 as affected by CVE-2026-31431 — check the CVE list\". Create it.",
+      "expected_output": "Agent does not create right away: it tells the user that Red Hat does not tie CVE-2026-31431 to nodejs:24 (probably a wrong or mistyped CVE) and asks whether to keep it, drop it or replace it; it creates only after the user confirms the CVE list.",
+      "criteria": [
+        "The agent surfaces the NOTE and says the CVE may be wrong for this package",
+        "The agent asks the user to confirm or fix the CVE list before creating",
+        "The agent does NOT silently call create_errata with the questionable CVE"
+      ],
+      "files": []
+    },
+    {
+      "id": 50,
+      "name": "errata_duplicate_stops",
+      "category": "errata",
+      "prompt": "Create errata for https://build.almalinux.org/build/94160, CVE-2026-109618 and CVE-2026-109619.",
+      "expected_output": "Agent calls preview_errata(builds=[94160], cves=['CVE-2026-109618', 'CVE-2026-109619']). The preview flags `!! DUPLICATE: ALSA-2026:87073 \"Important: php:8.2 security update\" already covers ...`. The agent tells the user that ALSA-2026:87073 already covers these CVEs for php:8.2 on AlmaLinux-8 and stops — it does NOT call create_errata, and never with force=True on its own.",
+      "criteria": [
+        "The agent calls preview_errata first",
+        "The agent tells the user about the duplicate ALSA-2026:87073",
+        "The agent does NOT call create_errata with force=True unless the user explicitly asks for a second advisory after seeing the duplicate"
+      ],
+      "files": []
+    },
+    {
+      "id": 51,
+      "name": "errata_force_after_explicit_ok",
+      "category": "errata",
+      "prompt": "I know ALSA-2026:87073 already covers it — create the AlmaLinux advisory for build 94160 with CVE-2026-109618 and CVE-2026-109619 anyway.",
+      "expected_output": "The user explicitly accepted the duplicate, so the agent calls create_errata(builds=[94160], cves=['CVE-2026-109618', 'CVE-2026-109619'], force=True) (it may preview first), then reports the created ID, the duplicate it was forced past, any failed build tasks, and verifies with get_errata.",
+      "criteria": [
+        "create_errata is called with force=True",
+        "The agent reports the result including the duplicate note",
+        "The agent verifies with get_errata"
+      ],
+      "files": []
     }
   ]
 }

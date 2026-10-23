@@ -19,6 +19,9 @@ from .constants import (
     LOG_NOISE_PATTERN,
     LOG_SEARCH_BEFORE_SPAN,
     LOG_SEARCH_MAX_MATCHES,
+    RH_ADVISORY_ID_PATTERN,
+    RH_CSAF_BASE,
+    RH_CVE_API,
     SECURE_BOOT_PACKAGES,
 )
 
@@ -224,6 +227,75 @@ class ALBSClient:
     async def get_release(self, release_id: int) -> dict[str, Any]:
         """Get a single release with its computed plan and status. No auth."""
         r = await self._http.get(f"{ALBS_API}/releases/{release_id}/")
+        r.raise_for_status()
+        return r.json()
+
+    # ── Errata (no auth for reads) ────────────────────────────────────
+
+    async def query_errata(
+        self,
+        errata_id: str | None = None,
+        errata_ids: list[str] | None = None,
+        platform_id: int | None = None,
+        page: int = 1,
+        title: str | None = None,
+        cve_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One page (10 records, newest issued first) of /errata/query/. No auth.
+
+        `errata_id`, `title` and `cve_id` are SUBSTRING matches on the server
+        (SQL LIKE '%x%'): `title` also searches the original title, and
+        cve_id "CVE-2026-3143" also finds CVE-2026-31431 — check the record's
+        references for the exact CVE. `errata_ids` are exact IDs. Returns {"records", "total_records",
+        "current_page"}, where total_records counts the whole filter.
+        """
+        params: dict[str, Any] = {"pageNumber": page}
+        if errata_id:
+            params["id"] = errata_id
+        if errata_ids:
+            params["ids"] = errata_ids
+        if title:
+            params["title"] = title
+        if cve_id:
+            params["cveId"] = cve_id
+        if platform_id is not None:
+            params["platformId"] = platform_id
+        r = await self._http.get(f"{ALBS_API}/errata/query/", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    async def list_alma_errata_ids(self, year: int) -> list[str]:
+        """Every AlmaLinux-issued advisory ID of `year`, on every platform.
+
+        The `-YYYY:A` substring matches ALSA/ALBA/ALEA-YYYY:A### and none of
+        the Red Hat-derived ALSA-YYYY:NNNN records. All pages are read: the
+        query is ordered by issued date, so a back-dated advisory can carry
+        the highest number on a later page.
+        """
+        ids: list[str] = []
+        page = 1
+        while True:
+            data = await self.query_errata(errata_id=f"-{year}:A", page=page)
+            records = data.get("records") or []
+            ids.extend(r["id"] for r in records)
+            if not records or len(ids) >= (data.get("total_records") or 0):
+                return ids
+            page += 1
+
+    async def get_rh_cve(self, cve_id: str) -> dict[str, Any]:
+        """Red Hat security data for one CVE (severity, CVSS, CWE, bugzilla,
+        affected packages). 404 when Red Hat has no record of the CVE."""
+        r = await self._http.get(f"{RH_CVE_API}/{cve_id}.json")
+        r.raise_for_status()
+        return r.json()
+
+    async def get_rh_advisory(self, advisory_id: str) -> dict[str, Any]:
+        """CSAF document of a Red Hat advisory, e.g. RHSA-2026:13566."""
+        match = re.fullmatch(RH_ADVISORY_ID_PATTERN, advisory_id)
+        if not match:
+            raise ValueError(f"Invalid Red Hat advisory ID: {advisory_id!r}")
+        name = advisory_id.lower().replace(":", "_")
+        r = await self._http.get(f"{RH_CSAF_BASE}/{match.group(1)}/{name}.json")
         r.raise_for_status()
         return r.json()
 
@@ -670,6 +742,19 @@ class ALBSClient:
         }
         r = await self._http.post(
             f"{ALBS_API}/releases/new/", json=payload, headers=self._auth_headers
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def create_errata(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Queue a new advisory on ALBS (POST /errata/new/). Requires JWT.
+
+        ALBS only validates the payload and hands it to a background worker,
+        so the response is {"ok": bool, "error": str | None} — the record
+        shows up in /errata/query/ once the worker has stored it.
+        """
+        r = await self._http.post(
+            f"{ALBS_API}/errata/new/", json=record, headers=self._auth_headers
         )
         r.raise_for_status()
         return r.json()

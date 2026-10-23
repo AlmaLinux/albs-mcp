@@ -332,3 +332,112 @@ async def test_get_release_returns_structure(client):
 async def test_get_release_nonexistent(client):
     with pytest.raises(Exception):
         await client.get_release(999999999)
+
+
+# ── Errata (public reads, Red Hat security data) ──────────────────────
+#
+# ALSA-2026:A001 (AlmaLinux-8, build 54743) and ALSA-2026:A003
+# (AlmaLinux-10, builds 54740 + its aarch64 retry 54757) are released
+# AlmaLinux advisories for CVE-2026-31431 — the previews below must
+# reproduce their package lists.
+
+@pytest.mark.asyncio
+async def test_query_errata_exact_id(client):
+    data = await client.query_errata(errata_ids=["ALSA-2026:A001"], platform_id=1)
+    assert data["total_records"] == 1
+    assert data["records"][0]["id"] == "ALSA-2026:A001"
+
+
+@pytest.mark.asyncio
+async def test_list_alma_errata_ids(client):
+    ids = await client.list_alma_errata_ids(2025)
+    assert {f"ALSA-2025:A00{i}" for i in range(1, 7)} <= set(ids)
+    assert all(":A" in i for i in ids)
+
+
+@pytest.mark.asyncio
+async def test_get_rh_cve(client):
+    data = await client.get_rh_cve("CVE-2026-31431")
+    assert data["name"] == "CVE-2026-31431"
+    assert data["threat_severity"] == "Important"
+
+
+@pytest.mark.asyncio
+async def test_get_rh_advisory(client):
+    data = await client.get_rh_advisory("RHSA-2026:13566")
+    assert data["document"]["tracking"]["id"] == "RHSA-2026:13566"
+    assert any(v["cve"] == "CVE-2026-31431" for v in data["vulnerabilities"])
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_reproduces_released_advisories(client):
+    import albs_mcp._commands as commands_module
+
+    commands_module._client = client
+    try:
+        result = await commands_module.preview_errata(
+            [54743, 54740, 54757], cves=["CVE-2026-31431"], package="kernel",
+            issued_date="2026-10-23",
+        )
+    finally:
+        commands_module._client = None
+    assert "AlmaLinux-8  build #54743" in result
+    assert "AlmaLinux-10  builds #54740, #54757" in result
+    assert "Title: kernel security update" in result
+    assert "Packages: 94 RPM(s)" in result   # = ALSA-2026:A001
+    assert "Packages: 272 RPM(s)" in result  # = ALSA-2026:A003
+    assert "CVE-2026-31431  Important" in result
+    # Package text taken from an earlier kernel advisory, as in A001.
+    assert "Description: package text from ALSA-" in result
+    assert (
+        "The kernel packages contain the Linux kernel, the core of any Linux "
+        "operating system." in result
+    )
+    # These advisories already exist — the preview flags them.
+    assert '!! DUPLICATE: ALSA-2026:A001 "Important: kernel security update"' in result
+    assert '!! DUPLICATE: ALSA-2026:A003 "Important: kernel security update"' in result
+    # 54740's aarch64 failure is reported although 54757 rebuilt it.
+    assert (
+        "! FAILED: build #54740 kernel aarch64 (task 411949) — rebuilt in "
+        "build #54757" in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_from_rhsa(client):
+    import albs_mcp._commands as commands_module
+
+    commands_module._client = client
+    try:
+        result = await commands_module.preview_errata(
+            [54740, 54757], rhsa="RHSA-2026:13566", issued_date="2026-10-23"
+        )
+    finally:
+        commands_module._client = None
+    assert "Title: kernel security update" in result
+    assert "Description: details text of RHSA-2026:13566" in result
+    assert "CVE-2026-31431  Important" in result
+    assert "Packages: 272 RPM(s)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_flags_existing_rhsa_advisory(client):
+    """Build 94160 is the php:8.2 rebuild that ALSA-2026:87073 (the imported
+    RHSA) already covers for these CVEs; the php:7.4 advisory with the same
+    CVEs is another module stream, so only a NOTE."""
+    import albs_mcp._commands as commands_module
+
+    commands_module._client = client
+    try:
+        result = await commands_module.preview_errata(
+            [94160], cves=["CVE-2026-109618", "CVE-2026-109619"],
+            issued_date="2026-10-23",
+        )
+    finally:
+        commands_module._client = None
+    assert "Module: php:8.2" in result
+    assert (
+        '!! DUPLICATE: ALSA-2026:87073 "Important: php:8.2 security update" '
+        "already covers CVE-2026-109618, CVE-2026-109619" in result
+    )
+    assert "php:7.4 security update" in result

@@ -409,7 +409,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--arch", action="append", default=[],
-        help="Architecture to build (repeat for multiple).",
+        help=(
+            "Architecture to build (repeat for multiple). Default: the "
+            "platform's arches except opt-in ones (riscv64 on AlmaLinux-10)."
+        ),
     )
     p.add_argument("--skip-tests", action="store_true", help="Disable %%check phase.")
     p.add_argument(
@@ -469,7 +472,10 @@ def build_parser() -> argparse.ArgumentParser:
         help='Dependency stream to build against, e.g. "perl:5.26" (repeat). '
              "Required for template deps without a stream.",
     )
-    p.add_argument("--arch", action="append", default=[], help="Architecture (repeat).")
+    p.add_argument(
+        "--arch", action="append", default=[],
+        help="Architecture (repeat). Default: the platform's non-opt-in arches.",
+    )
     p.add_argument(
         "--platform-version", default=None,
         help="Module platform version, e.g. 8.10 (default: newest).",

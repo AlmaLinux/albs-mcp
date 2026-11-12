@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from albs_mcp.client import ALBSClient
-from albs_mcp.constants import LOG_ERROR_PATTERN, LOG_MAX_RESULT_CHARS
+from albs_mcp.constants import LOG_ERROR_PATTERN, LOG_MAX_RESULT_CHARS, OPT_IN_ARCHES
 
 BUILD_ID = 52745
 # A long-since completed release — safe to read.
@@ -62,6 +62,16 @@ async def test_platform_arches_include_expected(client):
     al9 = arches.get("AlmaLinux-9", [])
     for expected in ["x86_64", "aarch64", "ppc64le", "s390x"]:
         assert expected in al9, f"{expected} not in AlmaLinux-9 arches"
+
+
+@pytest.mark.asyncio
+async def test_opt_in_arches_exist_on_albs(client):
+    """Every OPT_IN_ARCHES entry is a real ALBS platform arch (riscv64 on AL10)."""
+    arches = await client.get_platform_arches()
+    for platform, opt_in in OPT_IN_ARCHES.items():
+        assert platform in arches, f"{platform} not on ALBS"
+        for arch in opt_in:
+            assert arch in arches[platform], f"{arch} not in {platform} arches"
 
 
 @pytest.mark.asyncio

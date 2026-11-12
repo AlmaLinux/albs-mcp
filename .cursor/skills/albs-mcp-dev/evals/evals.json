@@ -708,6 +708,32 @@
         "The agent asks for the perl stream(s) or derives them from previous builds"
       ],
       "files": []
+    },
+    {
+      "id": 55,
+      "name": "al10_default_arches_skip_riscv64",
+      "category": "build",
+      "prompt": "Build bash from branch a10s for AlmaLinux-10.",
+      "expected_output": "Agent calls create_build(packages=[\"bash\"], platform=\"AlmaLinux-10\", branch=\"a10s\") without arch_list — the AlmaLinux-10 default leaves out the opt-in riscv64. It does NOT ask about architectures and does NOT add riscv64 on its own.",
+      "criteria": [
+        "The agent calls create_build with platform AlmaLinux-10 and branch a10s",
+        "create_build is called without arch_list (platform default), or with an arch_list that does NOT contain riscv64",
+        "The agent does NOT ask the user which architectures to use"
+      ],
+      "files": []
+    },
+    {
+      "id": 56,
+      "name": "al10_riscv64_on_request",
+      "category": "build",
+      "prompt": "Build bash from branch a10s for AlmaLinux-10, and build riscv64 as well this time.",
+      "expected_output": "riscv64 is opt-in on AlmaLinux-10, so leaving arch_list unset would skip it. Agent passes arch_list explicitly with the AlmaLinux-10 default arches plus riscv64: [\"i686\", \"x86_64\", \"x86_64_v2\", \"aarch64\", \"ppc64le\", \"s390x\", \"riscv64\"] (taken from get_platforms).",
+      "criteria": [
+        "The agent calls create_build with platform AlmaLinux-10",
+        "create_build is called with an explicit arch_list that contains riscv64",
+        "The arch_list also contains the other AlmaLinux-10 arches (i686, x86_64, x86_64_v2, aarch64, ppc64le, s390x) — the user asked for riscv64 in addition, not instead"
+      ],
+      "files": []
     }
   ]
 }

@@ -130,6 +130,10 @@ def mock_client():
         {"name": "AlmaLinux-9", "arch_list": ["x86_64", "aarch64", "s390x"]},
         {"name": "AlmaLinux-10", "arch_list": ["x86_64", "aarch64"]},
     ])
+    client.get_platform_arches = AsyncMock(return_value={
+        "AlmaLinux-9": ["x86_64", "aarch64", "s390x"],
+        "AlmaLinux-10": ["x86_64", "aarch64", "riscv64"],
+    })
     client.get_sign_keys = AsyncMock(return_value=[
         {"id": 4, "name": "AL9-key", "keyid": "ABC123", "active": True, "description": "Main key", "platform_ids": [2]},
     ])
@@ -246,6 +250,22 @@ async def test_get_platforms_tool(mock_client):
     assert "AlmaLinux-9" in result
     assert "AlmaLinux-10" in result
     assert "x86_64" in result
+
+
+@pytest.mark.asyncio
+async def test_get_platforms_marks_opt_in_riscv64_on_al10(mock_client):
+    """riscv64 is listed for AlmaLinux-10 and flagged as not built by default."""
+    mock_client.get_platforms = AsyncMock(return_value=[
+        {"name": "AlmaLinux-10", "arch_list": ["x86_64", "aarch64", "riscv64"]},
+        {"name": "AlmaLinux-Kitten-10", "arch_list": ["x86_64", "riscv64"]},
+    ])
+    result = await get_platforms()
+    al10 = next(l for l in result.splitlines() if "AlmaLinux-10 " in l)
+    assert "arches: x86_64, aarch64, riscv64" in al10
+    assert "not built by default: riscv64" in al10
+    kitten = next(l for l in result.splitlines() if "AlmaLinux-Kitten-10" in l)
+    assert "riscv64" in kitten
+    assert "not built by default" not in kitten
 
 
 # ── get_build_info ────────────────────────────────────────────────────
@@ -733,6 +753,33 @@ async def test_create_build_tool(mock_client):
     assert "Build created successfully" in result
     assert "99999" in result
     assert "build.almalinux.org/build/99999" in result
+    assert "opt-in" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_build_al10_default_notes_skipped_riscv64(mock_client):
+    """Default arches on AlmaLinux-10: the result says riscv64 was left out."""
+    result = await create_build(
+        packages=["bash"], platform="AlmaLinux-10", branch="a10s",
+    )
+    assert "Build created successfully" in result
+    assert "AlmaLinux-10: not built by default (opt-in): riscv64" in result
+    assert mock_client.create_build.call_args[1]["arch_list"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_build_al10_explicit_arches_no_opt_in_note(mock_client):
+    """With an explicit arch_list (riscv64 included) there is nothing to note."""
+    result = await create_build(
+        packages=["bash"], platform="AlmaLinux-10", branch="a10s",
+        arch_list=["x86_64", "riscv64"],
+    )
+    assert "Build created successfully" in result
+    assert "opt-in" not in result
+    assert mock_client.create_build.call_args[1]["arch_list"] == [
+        "x86_64", "riscv64",
+    ]
+    mock_client.get_platform_arches.assert_not_called()
 
 
 @pytest.mark.asyncio

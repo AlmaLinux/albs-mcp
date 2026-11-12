@@ -19,6 +19,7 @@ from .client import (
     ALBSClient,
     get_completed_task_ids,
     get_whole_package_task_ids,
+    opt_in_arches,
 )
 from .constants import (
     ALBS_URL,
@@ -150,8 +151,15 @@ async def get_platforms() -> str:
         return _api_error("getting platforms", e)
     lines = [f"Platforms ({len(platforms)}):", ""]
     for p in platforms:
-        arches = ", ".join(p.get("arch_list", []))
-        lines.append(f"  {p['name']:30} arches: {arches}")
+        arch_list = p.get("arch_list", [])
+        line = f"  {p['name']:30} arches: {', '.join(arch_list)}"
+        opt_in = opt_in_arches(p["name"], arch_list)
+        if opt_in:
+            line += (
+                f"  [opt-in, not built by default: {', '.join(opt_in)} — "
+                f"request it explicitly (arch_list / --arch)]"
+            )
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -798,6 +806,17 @@ async def create_build(
 
     client = _get_client()
     try:
+        if not arch_list:
+            # Same cached fetch create_build validates against — no extra call.
+            # An unknown platform is rejected by create_build right below.
+            platform_arches = await client.get_platform_arches()
+            for plat in all_platforms:
+                skipped = opt_in_arches(plat, platform_arches.get(plat, []))
+                if skipped:
+                    notes.append(
+                        f"{plat}: not built by default (opt-in): "
+                        f"{', '.join(skipped)} — request it explicitly (arch_list / --arch)"
+                    )
         result = await client.create_build(
             packages=pkg_dicts,
             platforms=all_platforms,

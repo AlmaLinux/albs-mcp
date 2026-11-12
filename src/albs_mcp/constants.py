@@ -158,6 +158,18 @@ LOG_NOISE_PATTERNS = [
 
 LOG_NOISE_PATTERN = "|".join(LOG_NOISE_PATTERNS)
 
+# ── Opt-in architectures ──────────────────────────────────────────────
+#
+# Arches a platform supports on ALBS but that are NOT built by default: when a
+# build gets no arch_list they are left out of the platform's arch set. They
+# stay valid in an explicit arch_list and get_platforms still lists them.
+# Every entry must exist in that platform's live arch_list (checked by an
+# integration test).
+
+OPT_IN_ARCHES: dict[str, list[str]] = {
+    "AlmaLinux-10": ["riscv64"],
+}
+
 # ── EPEL build defaults ───────────────────────────────────────────────
 
 EPEL_URL_PATTERN = "dl.fedoraproject.org/pub/epel"

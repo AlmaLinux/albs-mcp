@@ -29,7 +29,7 @@ Two ways to use:
 
 ### With a JWT token (authenticated)
 
-- **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without.
+- **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list, minus opt-in arches (riscv64 on AlmaLinux-10 is built only when you ask for it), unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without.
 - **Create module builds** — build a modular stream (e.g. `perl-DBI:1.641` on AlmaLinux-8) exactly like the web UI: ALBS's module preview reads `modules.yaml` of the module branch, every component is built, and ALBS computes module version, context and the `.module_el8…` dist. Dependencies the template leaves without a stream (`perl: []`) must be given one (`dependency_streams=["perl:5.26"]`, one build per stream) — the tool refuses otherwise instead of producing a build that fails with `missing groups or modules: perl:`.
 - **Sign builds** — create sign tasks with a chosen key.
 - **List sign keys** — see available keys with IDs and platform mappings.
@@ -204,7 +204,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 
 | Tool | Description |
 |---|---|
-| `get_platforms` | All platforms and their architectures, fetched dynamically from ALBS |
+| `get_platforms` | All platforms and their architectures, fetched dynamically from ALBS; opt-in arches (not built by default, e.g. riscv64 on AlmaLinux-10) are marked |
 | `get_build_info` | Build summary: every task with status, arch, package, git ref, log count, plus Secure Boot state, flavors and any linked builds |
 | `get_failed_tasks` | Only failed tasks with their log files listed; key logs marked with ★ |
 | `list_build_logs` | All log/config files available for a build on the server |
@@ -305,7 +305,7 @@ For external Git repos (e.g. GitHub), use `git_urls`:
 create_build(git_urls=["https://github.com/ykohut/leapp-data.git"], platform="AlmaLinux-10", branch="devel-ng-0.23.0")
 ```
 
-Architectures default to each platform's full list. When `arch_list` is specified with multiple platforms, it is validated against each platform individually.
+Architectures default to each platform's full list, except opt-in arches: **riscv64 on AlmaLinux-10 is not built by default**. It stays a valid arch — to build it, pass the arches explicitly, e.g. `arch_list=["i686", "x86_64", "x86_64_v2", "aarch64", "ppc64le", "s390x", "riscv64"]` (CLI: repeat `--arch`). `get_platforms` marks opt-in arches, and the `create_build` result notes which ones were left out. The opt-in list lives in `OPT_IN_ARCHES` in `constants.py`. When `arch_list` is specified with multiple platforms, it is validated against each platform individually.
 
 ## Example: creating module builds
 
@@ -404,10 +404,10 @@ The preview adds a `NOTE` when Red Hat does not tie one of the given CVEs to the
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 373 tests)
+# Unit tests (no network, 382 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
-# Integration tests (hits real ALBS API, read-only, 37 tests)
+# Integration tests (hits real ALBS API, read-only, 38 tests)
 pytest tests/test_integration.py -v
 
 # All tests

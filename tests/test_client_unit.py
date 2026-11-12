@@ -11,9 +11,11 @@ from albs_mcp.client import (
     ALBSClient,
     build_module_task,
     clip_line,
+    default_arches,
     extract_el_version,
     get_completed_task_ids,
     get_whole_package_task_ids,
+    opt_in_arches,
 )
 from albs_mcp.constants import ALBS_API
 
@@ -1240,6 +1242,87 @@ async def test_create_build_multiple_platforms_bad_arch(client):
             branch="c9s",
             arch_list=["s390x"],
         )
+
+
+# ── create_build: opt-in arches (riscv64 on AlmaLinux-10) ─────────────
+
+AL10_ARCHES = ["i686", "x86_64", "x86_64_v2", "aarch64", "ppc64le", "s390x", "riscv64"]
+
+
+def test_opt_in_arches_al10_riscv64():
+    assert opt_in_arches("AlmaLinux-10", AL10_ARCHES) == ["riscv64"]
+    assert default_arches("AlmaLinux-10", AL10_ARCHES) == AL10_ARCHES[:-1]
+
+
+def test_opt_in_arches_other_platforms_untouched():
+    """Only AlmaLinux-10 has opt-in arches; Kitten-10 keeps riscv64 by default."""
+    assert opt_in_arches("AlmaLinux-Kitten-10", AL10_ARCHES) == []
+    assert default_arches("AlmaLinux-Kitten-10", AL10_ARCHES) == AL10_ARCHES
+    assert default_arches("AlmaLinux-9", ["x86_64", "s390x"]) == ["x86_64", "s390x"]
+
+
+@pytest.mark.asyncio
+async def test_create_build_al10_default_skips_riscv64(client):
+    """No arch_list on AlmaLinux-10 → every arch except riscv64."""
+    client._platforms_cache = {"AlmaLinux-10": AL10_ARCHES}
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}], platforms=["AlmaLinux-10"], branch="a10s",
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platforms"][0]["arch_list"] == [
+        "i686", "x86_64", "x86_64_v2", "aarch64", "ppc64le", "s390x",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_build_al10_explicit_riscv64_allowed(client):
+    """riscv64 stays a valid AlmaLinux-10 arch when asked for explicitly."""
+    client._platforms_cache = {"AlmaLinux-10": AL10_ARCHES}
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}], platforms=["AlmaLinux-10"], branch="a10s",
+        arch_list=["x86_64", "riscv64"],
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platforms"][0]["arch_list"] == ["x86_64", "riscv64"]
+
+
+@pytest.mark.asyncio
+async def test_create_build_kitten_default_keeps_riscv64(client):
+    """Kitten-10 is not opt-in: its default still includes riscv64."""
+    client._platforms_cache = {"AlmaLinux-Kitten-10": AL10_ARCHES}
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}], platforms=["AlmaLinux-Kitten-10"],
+        branch="kitten",
+    )
+    call_data = client._http.post.call_args[1]["json"]
+    assert call_data["platforms"][0]["arch_list"] == AL10_ARCHES
+
+
+@pytest.mark.asyncio
+async def test_create_build_al10_and_kitten_defaults_per_platform(client):
+    """Defaults are computed per platform in a multi-platform build."""
+    client._platforms_cache = {
+        "AlmaLinux-10": AL10_ARCHES, "AlmaLinux-Kitten-10": AL10_ARCHES,
+    }
+    client._http.post = AsyncMock(
+        return_value=_mock_response({"id": 1, "created_at": "x"})
+    )
+    await client.create_build(
+        packages=[{"bash": "None"}],
+        platforms=["AlmaLinux-10", "AlmaLinux-Kitten-10"], branch="a10s",
+    )
+    entries = client._http.post.call_args[1]["json"]["platforms"]
+    assert "riscv64" not in entries[0]["arch_list"]
+    assert "riscv64" in entries[1]["arch_list"]
 
 
 # ── create_build: independent_tasks ───────────────────────────────────

@@ -20,6 +20,7 @@ from .constants import (
     LOG_SEARCH_BEFORE_SPAN,
     LOG_SEARCH_MAX_MATCHES,
     MODULE_PREVIEW_TIMEOUT,
+    OPT_IN_ARCHES,
     RH_ADVISORY_ID_PATTERN,
     RH_CSAF_BASE,
     RH_CVE_API,
@@ -89,6 +90,22 @@ def extract_el_version(pkg_name: str) -> str | None:
     cleaned = pkg_name.replace(".src.rpm", "").split("-")[-1]
     match = re.search(r"\.el\d{1,2}[^-]*", cleaned)
     return match.group(0) if match else None
+
+
+def opt_in_arches(platform: str, arch_list: list[str]) -> list[str]:
+    """Arches of *arch_list* that *platform* builds only when asked for.
+
+    They are valid in an explicit arch_list but left out of the default one
+    (see OPT_IN_ARCHES), e.g. riscv64 on AlmaLinux-10.
+    """
+    opt_in = OPT_IN_ARCHES.get(platform, [])
+    return [a for a in arch_list if a in opt_in]
+
+
+def default_arches(platform: str, arch_list: list[str]) -> list[str]:
+    """Arches a build of *platform* gets when the caller passes no arch_list."""
+    skip = opt_in_arches(platform, arch_list)
+    return [a for a in arch_list if a not in skip]
 
 
 def get_completed_task_ids(build_info: dict[str, Any]) -> list[int]:
@@ -869,7 +886,12 @@ class ALBSClient:
         arch_list: list[str] | None,
         independent_tasks: bool,
     ) -> list[dict[str, Any]]:
-        """Validate platforms + arches against ALBS; build payload entries."""
+        """Validate platforms + arches against ALBS; build payload entries.
+
+        Without an arch_list each platform gets its default arches: the full
+        ALBS list minus its opt-in arches (riscv64 on AlmaLinux-10), which
+        stay valid in an explicit arch_list.
+        """
         platform_arches = await self.get_platform_arches()
         entries: list[dict[str, Any]] = []
         for plat in platforms:
@@ -879,7 +901,7 @@ class ALBSClient:
                     f"Available: {', '.join(sorted(platform_arches))}"
                 )
             allowed = platform_arches[plat]
-            arches = arch_list or allowed
+            arches = arch_list or default_arches(plat, allowed)
             bad = [a for a in arches if a not in allowed]
             if bad:
                 raise ValueError(

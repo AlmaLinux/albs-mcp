@@ -17,6 +17,7 @@ from albs_mcp.constants import (
 )
 from albs_mcp.server import (
     mcp,
+    create_module_build,
     get_build_info,
     get_failed_tasks,
     get_platforms,
@@ -159,6 +160,33 @@ def mock_client():
         1, 936, 3,
     ))
     client.create_build = AsyncMock(return_value={"id": 99999, "created_at": "2026-03-10T00:00:00"})
+    client.create_module_build = AsyncMock(return_value=(
+        {"id": 100700, "created_at": "2026-11-12T00:00:00"},
+        {
+            "module_name": "perl-DBI",
+            "module_stream": "1.641",
+            "module_platform_version": "8.10",
+            "enabled_modules": {
+                "buildtime": ["perl:5.26"], "runtime": ["perl:5.26"],
+            },
+            "refs": [
+                {
+                    "url": "https://git.almalinux.org/rpms/perl-DBI.git",
+                    "git_ref": "c8-stream-1.641",
+                    "enabled": True,
+                    "mock_options": {"module_enable": [
+                        "perl-DBI:1.641", "perl-DBI-devel:1.641", "perl:5.26",
+                    ]},
+                },
+                {
+                    "url": "https://git.almalinux.org/rpms/perl-Foo.git",
+                    "git_ref": "c8-stream-1.641",
+                    "enabled": False,
+                    "mock_options": {},
+                },
+            ],
+        },
+    ))
     client.sign_build = AsyncMock(return_value={"id": 888, "status": 1})
     client.get_platform_ids = AsyncMock(return_value={
         "AlmaLinux-9": 2, "AlmaLinux-10": 3,
@@ -2512,3 +2540,71 @@ async def test_preview_errata_rhsa_details_one_fix_per_line(errata_client):
         "  * kernel: a (CVE-2026-31402)\n  * kernel: b (CVE-2026-23270)\n\n"
         "For more details."
     )
+
+
+
+# ── create_module_build ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_module_build_tool(mock_client):
+    result = await create_module_build(
+        platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream-1.641",
+        dependency_streams=["perl:5.26"],
+    )
+    assert "Module build created successfully" in result
+    assert "build.almalinux.org/build/100700" in result
+    assert "Module: perl-DBI:1.641 (platform version 8.10)" in result
+    assert "Buildrequires: perl:5.26" in result
+    assert "perl-DBI:1.641, perl-DBI-devel:1.641, perl:5.26" in result
+    assert "Components (1/2 to build)" in result
+    assert "perl-Foo c8-stream-1.641  [skip (already built)]" in result
+    kw = mock_client.create_module_build.call_args[1]
+    assert kw["module_url"] == "https://git.almalinux.org/modules/perl-DBI.git"
+    assert kw["branch"] == "c8-stream-1.641"
+    assert kw["platform"] == "AlmaLinux-8"
+    assert kw["dependency_streams"] == ["perl:5.26"]
+    assert kw["definitions"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_tool_full_url_and_skip_tests(mock_client):
+    url = "https://git.almalinux.org/modules/nodejs.git"
+    result = await create_module_build(
+        platform="AlmaLinux-8", module=url, branch="c8-stream-20",
+        skip_tests=True, excludes="foo bar",
+    )
+    assert "Tests disabled" in result
+    kw = mock_client.create_module_build.call_args[1]
+    assert kw["module_url"] == url
+    assert kw["definitions"] == {"__spec_check_template": "exit 0;"}
+    assert kw["excludes"] == ["foo", "bar"]
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_tool_validation_error(mock_client):
+    mock_client.create_module_build = AsyncMock(side_effect=ValueError(
+        "Module perl-DBI:1.641 depends on ['perl'] without a stream"
+    ))
+    result = await create_module_build(
+        platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream-1.641",
+    )
+    assert result.startswith("Error:")
+    assert "without a stream" in result
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_tool_auth_error(mock_client):
+    mock_client.create_module_build = AsyncMock(side_effect=PermissionError("no jwt"))
+    result = await create_module_build(
+        platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream-1.641",
+        dependency_streams=["perl:5.26"],
+    )
+    assert "Auth error" in result
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_tool_registered():
+    tools = {t.name: t for t in await mcp.list_tools()}
+    assert "create_module_build" in tools
+    props = tools["create_module_build"].input_schema["properties"]
+    assert "dependency_streams" in props

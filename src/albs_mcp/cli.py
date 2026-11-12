@@ -138,6 +138,25 @@ def _cmd_create_build(args: argparse.Namespace) -> None:
     ))
 
 
+def _cmd_create_module_build(args: argparse.Namespace) -> None:
+    _exec(cmd.create_module_build(
+        platform=args.platform,
+        module=args.module,
+        branch=args.branch,
+        dependency_streams=args.stream or None,
+        arch_list=args.arch or None,
+        module_platform_version=args.platform_version,
+        module_version=args.module_version,
+        skip_tests=args.skip_tests,
+        beta=args.beta,
+        flavors=args.flavor or None,
+        excludes=args.excludes,
+        definitions=args.definitions,
+        linked_builds=args.linked_build or None,
+        independent_tasks=args.independent_tasks,
+    ))
+
+
 def _cmd_sign_build(args: argparse.Namespace) -> None:
     _exec(cmd.sign_build(args.build_id, args.key_id))
 
@@ -436,6 +455,43 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_create_build)
+
+    # ── create-module-build ───────────────────────────────────────────
+    p = sub.add_parser(
+        "create-module-build",
+        help="Create a module (modular stream) build (requires JWT).",
+    )
+    p.add_argument("platform", help="Target platform (AlmaLinux-8, AlmaLinux-9).")
+    p.add_argument("module", help="Module repo in git.almalinux.org/modules or full URL.")
+    p.add_argument("branch", help="Module branch, e.g. c8-stream-1.641.")
+    p.add_argument(
+        "--stream", action="append", default=[],
+        help='Dependency stream to build against, e.g. "perl:5.26" (repeat). '
+             "Required for template deps without a stream.",
+    )
+    p.add_argument("--arch", action="append", default=[], help="Architecture (repeat).")
+    p.add_argument(
+        "--platform-version", default=None,
+        help="Module platform version, e.g. 8.10 (default: newest).",
+    )
+    p.add_argument("--module-version", default=None, help="Explicit module version.")
+    p.add_argument("--skip-tests", action="store_true", help="Disable %%check phase.")
+    p.add_argument("--beta", action="store_true", help="Enable beta flavor.")
+    p.add_argument(
+        "--flavor", action="append", default=[],
+        help="Additional flavor name (repeat for multiple).",
+    )
+    p.add_argument("--excludes", default=None, help="Space-separated packages to exclude.")
+    p.add_argument("--definitions", default=None, help="JSON mock definitions.")
+    p.add_argument(
+        "--linked-build", action="append", type=int, default=[],
+        help="Build ID to link (repeat for multiple).",
+    )
+    p.add_argument(
+        "--independent-tasks", dest="independent_tasks", action="store_true",
+        help="Build component tasks in parallel instead of chained.",
+    )
+    p.set_defaults(func=_cmd_create_module_build)
 
     # ── sign-build ────────────────────────────────────────────────────
     p = sub.add_parser("sign-build", help="Sign a build (requires JWT).")

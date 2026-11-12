@@ -2,6 +2,12 @@ ALBS_URL = "https://build.almalinux.org"
 ALBS_API = f"{ALBS_URL}/api/v1"
 ALBS_LOGS_BASE = f"{ALBS_URL}/pulp/content/build_logs"
 
+# Module git repos (modules.yaml per branch, e.g. c8-stream-1.641) — what the
+# ALBS UI lists under /projects/alma/modularity.
+MODULES_GIT_BASE = "https://git.almalinux.org/modules"
+# /builds/get_module_preview/ queries gitea + beholder per component; slow.
+MODULE_PREVIEW_TIMEOUT = 120.0
+
 BUILD_TASK_STATUS = {
     0: "idle",
     1: "started",

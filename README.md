@@ -30,6 +30,7 @@ Two ways to use:
 ### With a JWT token (authenticated)
 
 - **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without.
+- **Create module builds** — build a modular stream (e.g. `perl-DBI:1.641` on AlmaLinux-8) exactly like the web UI: ALBS's module preview reads `modules.yaml` of the module branch, every component is built, and ALBS computes module version, context and the `.module_el8…` dist. Dependencies the template leaves without a stream (`perl: []`) must be given one (`dependency_streams=["perl:5.26"]`, one build per stream) — the tool refuses otherwise instead of producing a build that fails with `missing groups or modules: perl:`.
 - **Sign builds** — create sign tasks with a chosen key.
 - **List sign keys** — see available keys with IDs and platform mappings.
 - **Create release plans** — build a *scheduled* release plan for a build (which packages go to which repositories) targeting a chosen platform + product. **The actual release is never performed** — this only creates the plan; committing/publishing is intentionally blocked.
@@ -154,6 +155,9 @@ albs create-build AlmaLinux-10 \
     --git-url https://github.com/ykohut/leapp-data.git \
     --branch devel-ng-0.23.0
 
+# Module build: one per dependency stream (perl-DBI:1.641 against perl:5.26)
+albs create-module-build AlmaLinux-8 perl-DBI c8-stream-1.641 --stream perl:5.26
+
 # Independent tasks (disable the default sequential per-platform task chain,
 # so packages build in parallel within each platform)
 albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
@@ -221,6 +225,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 |---|---|
 | `get_sign_keys` | List sign keys: ID, name, GPG keyid, active status, platform mappings |
 | `create_build` | Create a build: packages or custom Git URLs + platform(s) + branch/tag/srpm, with all mock options |
+| `create_module_build` | Create a module build: module repo + branch (`c8-stream-1.641`) + platform + `dependency_streams` (`perl:5.26`); payload as the web UI sends it |
 | `sign_build` | Create a sign task for a build with a chosen key |
 | `create_release_plan` | Create a *scheduled* release plan for a build + platform + product. **Never performs the actual release** — only the plan |
 | `create_errata` | Create AlmaLinux advisories (`ALSA-YYYY:Annn`) from a package + CVEs (or an RHSA) + build(s); everything else is filled automatically, IDs assigned right before creating. Refuses duplicates of existing advisories unless `force=True`. Does not release them |
@@ -301,6 +306,19 @@ create_build(git_urls=["https://github.com/ykohut/leapp-data.git"], platform="Al
 ```
 
 Architectures default to each platform's full list. When `arch_list` is specified with multiple platforms, it is validated against each platform individually.
+
+## Example: creating module builds
+
+Ask the agent: *"Rebuild perl-DBI:1.641 for AlmaLinux-8 for every perl stream, like the previous builds"*
+
+The agent looks at the previous builds (`search_builds(project="perl-DBI")` + `get_build_info`) — each one's `module_enable` names the perl stream it was for — and creates one module build per stream:
+```
+create_module_build(platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream-1.641", dependency_streams=["perl:5.24"])
+create_module_build(platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream-1.641", dependency_streams=["perl:5.26"])
+...
+```
+
+`create_build(modules=[...])` is not a module build — it only enables modules in mock for a plain package build.
 
 ## Example: creating a release plan
 
@@ -386,7 +404,7 @@ The preview adds a `NOTE` when Red Hat does not tie one of the given CVEs to the
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 347 tests)
+# Unit tests (no network, 373 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
 # Integration tests (hits real ALBS API, read-only, 37 tests)

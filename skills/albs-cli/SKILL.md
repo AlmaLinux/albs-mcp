@@ -30,6 +30,7 @@ albs search [--project NAME] [--page N]     # search builds
 albs sign-keys                              # list sign keys (requires JWT)
 albs flavors                                # list platform flavors
 albs create-build PLATFORM PKG [PKG...]     # create build (requires JWT)
+albs create-module-build PLATFORM MODULE BRANCH --stream DEP:STREAM  # module build (requires JWT)
 albs sign-build BUILD_ID [--key-id N]       # sign build (requires JWT)
 albs products                               # list products (release targets)
 albs release-plan RELEASE_ID                # view an existing release plan
@@ -82,6 +83,22 @@ albs create-build AlmaLinux-9 bash --branch c9s --skip-tests
 # instead of the default sequential per-platform chain)
 albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
 ```
+
+## Building modules
+
+A module stream (e.g. `perl-DBI:1.641` on AlmaLinux-8) is built with
+`create-module-build`, NOT `create-build --module` (that only enables modules
+in mock). One build per dependency stream — take the streams from the
+previous builds' `module_enable` (`albs search --project perl-DBI`,
+`albs build-info ID`), or ask the user:
+
+```bash
+albs create-module-build AlmaLinux-8 perl-DBI c8-stream-1.641 --stream perl:5.26
+```
+
+A dependency the template leaves without a stream (`perl: []`) must get one via
+`--stream`; the command refuses otherwise (mock would fail with
+`missing groups or modules: perl:`).
 
 ## Building EPEL packages
 

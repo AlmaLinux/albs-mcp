@@ -670,6 +670,44 @@
         "The agent verifies with get_errata"
       ],
       "files": []
+    },
+    {
+      "id": 52,
+      "name": "module_build_tool_selection",
+      "category": "tool_selection",
+      "prompt": "Собери модуль perl-DBI:1.641 для AlmaLinux-8 из ветки c8-stream-1.641 под perl 5.26",
+      "expected_output": "The agent calls create_module_build(platform='AlmaLinux-8', module='perl-DBI', branch='c8-stream-1.641', dependency_streams=['perl:5.26']) — not create_build(modules=[...]) — and reports the build URL, module, buildrequires and mock module_enable.",
+      "criteria": [
+        "create_module_build is called, not create_build",
+        "dependency_streams=['perl:5.26'] is passed",
+        "branch='c8-stream-1.641' and platform='AlmaLinux-8'"
+      ],
+      "files": []
+    },
+    {
+      "id": 53,
+      "name": "module_build_rebuild_per_stream",
+      "category": "build",
+      "prompt": "Build 100601 of perl-DBI failed. Look at how the previous builds were run for each perl stream and start them the same way.",
+      "expected_output": "The agent inspects 100601 (module_enable 'perl:' without a stream → mock 'missing groups or modules: perl:'), finds the previous perl-DBI builds via search_builds(project='perl-DBI') and get_build_info, reads the perl stream from each one's module_enable (5.24, 5.26, 5.30, 5.32), and calls create_module_build once per stream with the same platform, module branch and arches, then reports all build URLs.",
+      "criteria": [
+        "The agent reads previous builds' module_enable to get the streams",
+        "create_module_build is called once per perl stream with dependency_streams=['perl:<stream>']",
+        "The agent does not create a build with a stream-less 'perl:' dependency"
+      ],
+      "files": []
+    },
+    {
+      "id": 54,
+      "name": "module_build_missing_stream_asks",
+      "category": "build",
+      "prompt": "Build the perl-DBI module, branch c8-stream-1.641, on AlmaLinux-8.",
+      "expected_output": "The perl dependency has no stream in the template (perl: []); there is no previous build to copy from in the prompt, so the agent either checks previous builds for the streams or ASKS the user which perl stream(s) to build against. If create_module_build is called without dependency_streams it returns an error naming 'perl' and the agent asks/derives instead of retrying blindly.",
+      "criteria": [
+        "The agent does not build with a stream-less perl dependency",
+        "The agent asks for the perl stream(s) or derives them from previous builds"
+      ],
+      "files": []
     }
   ]
 }

@@ -41,6 +41,7 @@ from .constants import (
     LOG_SEARCH_AFTER,
     LOG_SEARCH_BEFORE,
     LOG_SEARCH_MAX_MATCHES,
+    MODULES_GIT_BASE,
     RELEASE_STATUS,
     RH_ADVISORY_ID_PATTERN,
     RH_ADVISORY_TITLE_PREFIX,
@@ -831,6 +832,87 @@ async def create_build(
         return "\n".join(lines)
     except Exception as e:
         return _api_error("creating build", e)
+
+
+async def create_module_build(
+    platform: str,
+    module: str,
+    branch: str,
+    dependency_streams: list[str] | None = None,
+    arch_list: list[str] | None = None,
+    module_platform_version: str | None = None,
+    module_version: str | None = None,
+    skip_tests: bool = False,
+    beta: bool = False,
+    flavors: list[str] | None = None,
+    excludes: str | None = None,
+    definitions: dict[str, str] | str | None = None,
+    linked_builds: list[int] | None = None,
+    independent_tasks: bool = False,
+) -> str:
+    if not module or not branch or not platform:
+        return "Error: platform, module and branch are required."
+    module = module.strip()
+    if module.startswith(("http://", "https://")):
+        module_url = module
+    else:
+        module_url = f"{MODULES_GIT_BASE}/{module}.git"
+
+    if definitions is None:
+        defs = None
+    elif isinstance(definitions, str):
+        defs = json.loads(definitions)
+    else:
+        defs = dict(definitions)
+    if skip_tests:
+        defs = defs or {}
+        defs["__spec_check_template"] = "exit 0;"
+
+    client = _get_client()
+    try:
+        result, task = await client.create_module_build(
+            module_url=module_url,
+            branch=branch.strip(),
+            platform=platform,
+            arch_list=arch_list,
+            dependency_streams=dependency_streams,
+            module_platform_version=module_platform_version,
+            module_version=module_version,
+            beta=beta,
+            additional_flavors=flavors,
+            excludes=excludes.split() if excludes else None,
+            definitions=defs,
+            linked_builds=linked_builds,
+            independent_tasks=independent_tasks,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return _api_error("creating module build", e)
+
+    refs = task["refs"]
+    enabled = [r for r in refs if r.get("enabled", True)]
+    deps = task["enabled_modules"]
+    lines = [
+        "Module build created successfully!",
+        f"Build ID: {result['id']}",
+        f"Created at: {result['created_at']}",
+        f"URL: https://build.almalinux.org/build/{result['id']}",
+        "",
+        f"Module: {task['module_name']}:{task['module_stream']} "
+        f"(platform version {task['module_platform_version']})",
+        f"Buildrequires: {', '.join(deps['buildtime']) or '-'}",
+        f"Requires: {', '.join(deps['runtime']) or '-'}",
+        f"Mock module_enable: {', '.join(refs[0]['mock_options']['module_enable'])}",
+        f"Components ({len(enabled)}/{len(refs)} to build):",
+    ]
+    for r in refs:
+        state = "build" if r.get("enabled", True) else "skip (already built)"
+        repo = r["url"].rstrip("/").split("/")[-1].removesuffix(".git")
+        lines.append(f"  - {repo} {r['git_ref']}  [{state}]")
+    if skip_tests:
+        lines.append("Tests disabled (__spec_check_template)")
+    return "\n".join(lines)
 
 
 async def sign_build(build_id: int, sign_key_id: int = 4) -> str:

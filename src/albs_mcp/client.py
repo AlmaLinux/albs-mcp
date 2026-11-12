@@ -19,6 +19,7 @@ from .constants import (
     LOG_NOISE_PATTERN,
     LOG_SEARCH_BEFORE_SPAN,
     LOG_SEARCH_MAX_MATCHES,
+    MODULE_PREVIEW_TIMEOUT,
     RH_ADVISORY_ID_PATTERN,
     RH_CSAF_BASE,
     RH_CVE_API,
@@ -124,6 +125,120 @@ def get_whole_package_task_ids(build_info: dict[str, Any]) -> list[int]:
         ):
             result.extend(t["id"] for t in tasks)
     return result
+
+
+def _split_module(spec: str) -> tuple[str, str]:
+    """'perl:5.26' -> ('perl', '5.26'); 'perl:' and 'perl' -> ('perl', '')."""
+    name, _, stream = spec.strip().partition(":")
+    return name.strip(), stream.strip()
+
+
+def build_module_task(
+    preview: dict[str, Any],
+    dependency_streams: list[str] | None,
+    module_platform_version: str,
+    module_version: str | None = None,
+) -> dict[str, Any]:
+    """Turn a /builds/get_module_preview/ answer into a module build task.
+
+    Mirrors what the ALBS web UI sends for a module (the BuildTaskModuleRef
+    payload): the module template's dependencies become `enabled_modules`
+    (written into the built modulemd), and `name:stream`, `name-devel:stream`
+    plus every dependency that has a stream go to mock `module_enable` of
+    each component ref.
+
+    A template dependency without a stream (modulemd `perl: []`, i.e. "any
+    stream") must be given one through `dependency_streams` — that picks
+    which stream this build is for (one build per stream). Fail-fast:
+    enabling it as bare `perl:` makes mock die with "missing groups or
+    modules: perl:". A dependency_streams entry overrides the template
+    stream; one for a module the template does not mention is only enabled
+    in mock (like adding a module in the UI's module editor).
+    """
+    name = preview["module_name"]
+    stream = preview["module_stream"]
+    template = preview.get("enabled_modules") or {}
+    buildtime = [_split_module(m) for m in template.get("buildtime", [])]
+    runtime = [_split_module(m) for m in template.get("runtime", [])]
+    template_names = {n for n, _ in buildtime + runtime}
+
+    chosen: dict[str, str] = {}
+    for spec in dependency_streams or []:
+        dep, dep_stream = _split_module(spec)
+        if not dep or not dep_stream:
+            raise ValueError(
+                f"Dependency stream {spec!r} must be in 'name:stream' form, "
+                f"e.g. 'perl:5.26'."
+            )
+        if chosen.get(dep, dep_stream) != dep_stream:
+            raise ValueError(
+                f"Two streams given for module '{dep}': "
+                f"{chosen[dep]} and {dep_stream}. A module build takes one "
+                f"stream per dependency — create one build per stream."
+            )
+        chosen[dep] = dep_stream
+
+    no_stream = sorted(
+        {n for n, s in buildtime + runtime if not s and n not in chosen}
+    )
+    if no_stream:
+        example = ", ".join(f'"{n}:<stream>"' for n in no_stream)
+        raise ValueError(
+            f"Module {name}:{stream} depends on {no_stream} without a stream "
+            f"(modulemd lists them as `[]`, any stream). Pass the stream to "
+            f"build against via dependency_streams=[{example}] — one build "
+            f"per stream. Without a stream mock fails with "
+            f"\"missing groups or modules: {no_stream[0]}:\"."
+        )
+
+    def resolve(deps: list[tuple[str, str]]) -> list[str]:
+        out: list[str] = []
+        for dep, dep_stream in deps:
+            item = f"{dep}:{chosen.get(dep, dep_stream)}"
+            if item not in out:
+                out.append(item)
+        return out
+
+    enabled_modules = {"buildtime": resolve(buildtime), "runtime": resolve(runtime)}
+    module_enable = [f"{name}:{stream}"]
+    if "-devel" not in name:
+        module_enable.append(f"{name}-devel:{stream}")
+    extra = [f"{n}:{s}" for n, s in chosen.items() if n not in template_names]
+    for item in enabled_modules["buildtime"] + enabled_modules["runtime"] + extra:
+        if item not in module_enable:
+            module_enable.append(item)
+
+    refs: list[dict[str, Any]] = []
+    for ref in preview.get("refs") or []:
+        ref = dict(ref)
+        mock_options = dict(ref.get("mock_options") or {})
+        mock_options["module_enable"] = list(module_enable)
+        ref["mock_options"] = mock_options
+        ref["test_configuration"] = {}
+        refs.append(ref)
+    enabled_refs = [r for r in refs if r.get("enabled", True)]
+    if not enabled_refs:
+        raise ValueError(
+            f"Module {name}:{stream} has no component to build: every "
+            f"component ref is disabled (ALBS found them already built)."
+        )
+    absent = [r["url"] for r in enabled_refs if r.get("exist") is False]
+    if absent:
+        raise ValueError(
+            f"Component branch '{refs[0]['git_ref']}' does not exist for: "
+            f"{', '.join(absent)}."
+        )
+
+    return {
+        "module_name": name,
+        "module_stream": stream,
+        "module_platform_version": module_platform_version,
+        "module_version": module_version,
+        "modules_yaml": preview["modules_yaml"],
+        "enabled_modules": enabled_modules,
+        "refs": refs,
+        "git_ref": preview.get("git_ref"),
+    }
 
 
 class ALBSClient:
@@ -550,11 +665,15 @@ class ALBSClient:
         must include the Bearer token or the server responds with 403
         {"detail": "Not authenticated"}.
         """
+        return {f["name"]: f["id"] for f in await self.get_flavor_records()}
+
+    async def get_flavor_records(self) -> list[dict[str, Any]]:
+        """Raw platform flavor records (id, name, modularity, data). Requires JWT."""
         r = await self._http.get(
             f"{ALBS_API}/platform_flavors/", headers=self._auth_headers
         )
         r.raise_for_status()
-        return {f["name"]: f["id"] for f in r.json()}
+        return r.json()
 
     async def get_sign_keys(self) -> list[dict[str, Any]]:
         """Get available sign keys. Requires JWT."""
@@ -590,27 +709,9 @@ class ALBSClient:
         if from_tag and branch:
             raise ValueError("from_tag and branch cannot be used together")
 
-        platform_arches = await self.get_platform_arches()
-        platform_entries: list[dict[str, Any]] = []
-        for plat in platforms:
-            if plat not in platform_arches:
-                raise ValueError(
-                    f"Unknown platform '{plat}'. "
-                    f"Available: {', '.join(sorted(platform_arches))}"
-                )
-            allowed = platform_arches[plat]
-            arches = arch_list or allowed
-            bad = [a for a in arches if a not in allowed]
-            if bad:
-                raise ValueError(
-                    f"Arch(es) {bad} not allowed for {plat}. Allowed: {allowed}"
-                )
-            platform_entries.append({
-                "name": plat,
-                "arch_list": arches,
-                "parallel_mode_enabled": True,
-                "independent_tasks": independent_tasks,
-            })
+        platform_entries = await self._platform_entries(
+            platforms, arch_list, independent_tasks
+        )
 
         if not nosecureboot:
             for pkg in packages:
@@ -651,64 +752,238 @@ class ALBSClient:
         }
         if linked_builds:
             data["linked_builds"] = linked_builds
-        if excludes:
-            data.setdefault("mock_options", {})["yum_exclude"] = excludes
-        if definitions:
-            data.setdefault("mock_options", {})["definitions"] = definitions
-        if with_opts:
-            data.setdefault("mock_options", {})["with"] = with_opts
-        if without_opts:
-            data.setdefault("mock_options", {})["without"] = without_opts
-        if modules:
-            data.setdefault("mock_options", {})["module_enable"] = modules
-        if beta or additional_flavors:
-            flavors = await self.get_flavors()
-            flav_ids: list[int] = []
-            if beta:
-                unsupported = [
-                    p for p in platforms if p not in BETA_PLATFORM_FLAVORS
-                ]
-                if unsupported:
-                    raise ValueError(
-                        f"beta=True is not supported for platform(s) "
-                        f"{unsupported}. Platforms with a known beta flavor: "
-                        f"{sorted(BETA_PLATFORM_FLAVORS)}. "
-                        f"Pass additional_flavors=[...] explicitly if you need "
-                        f"a non-standard beta flavor."
-                    )
-                wanted: list[str] = []
-                for plat in platforms:
-                    wanted.extend(BETA_PLATFORM_FLAVORS[plat])
-                # Validate the predefined names against the live API —
-                # never trust constants without verifying (per AGENTS.md).
-                missing = [n for n in wanted if n not in flavors]
-                if missing:
-                    raise ValueError(
-                        f"Beta flavor(s) {missing} from BETA_PLATFORM_FLAVORS "
-                        f"are not present on ALBS. The constant is stale — "
-                        f"update src/albs_mcp/constants.py. "
-                        f"Available: {sorted(flavors)}"
-                    )
-                flav_ids.extend(flavors[n] for n in wanted)
-            if additional_flavors:
-                unknown = [f for f in additional_flavors if f not in flavors]
-                if unknown:
-                    raise ValueError(
-                        f"Unknown flavor(s): {unknown}. "
-                        f"Available: {sorted(flavors)}"
-                    )
-                flav_ids.extend(flavors[f] for f in additional_flavors)
-            # de-duplicate while preserving order
-            seen: set[int] = set()
-            deduped = [i for i in flav_ids if not (i in seen or seen.add(i))]
-            if deduped:
-                data.setdefault("platform_flavors", []).extend(deduped)
+        mock_options = self._build_mock_options(
+            excludes, definitions, with_opts, without_opts, modules
+        )
+        if mock_options:
+            data["mock_options"] = mock_options
+        flav_ids = await self._flavor_ids(platforms, beta, additional_flavors)
+        if flav_ids:
+            data["platform_flavors"] = flav_ids
+        return await self._post_build(data)
 
+    async def get_module_preview(
+        self,
+        module_url: str,
+        branch: str,
+        platform: str,
+        arch_list: list[str],
+        flavor_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Ask ALBS how it would build a module branch. Requires JWT.
+
+        POST /builds/get_module_preview/ reads modules.yaml of the module
+        git branch and returns the component refs (with their branches and
+        buildopts macros), the modulemd template (`modules_yaml`, module +
+        -devel) and its dependencies (`enabled_modules`, "name:stream" —
+        "name:" when the template allows any stream). Nothing is created.
+        """
+        payload = {
+            "ref": {"url": module_url, "git_ref": branch, "ref_type": 1},
+            "platform_name": platform,
+            "platform_arches": arch_list,
+            "flavors": flavor_ids or [],
+        }
+        r = await self._http.post(
+            f"{ALBS_API}/builds/get_module_preview/",
+            json=payload,
+            headers=self._auth_headers,
+            timeout=MODULE_PREVIEW_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def create_module_build(
+        self,
+        module_url: str,
+        branch: str,
+        platform: str,
+        arch_list: list[str] | None = None,
+        dependency_streams: list[str] | None = None,
+        module_platform_version: str | None = None,
+        module_version: str | None = None,
+        beta: bool = False,
+        additional_flavors: list[str] | None = None,
+        excludes: list[str] | None = None,
+        definitions: dict[str, str] | None = None,
+        linked_builds: list[int] | None = None,
+        independent_tasks: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Create a module build the way the ALBS web UI does. Requires JWT.
+
+        Validates the platform/arches/flavors, takes the module preview for
+        `branch`, resolves the dependency streams (build_module_task) and
+        posts one module task. ALBS then computes version, context and the
+        `.module_elX...` dist itself. Returns (created build, module task
+        that was sent).
+        """
+        platform_entries = await self._platform_entries(
+            [platform], arch_list, independent_tasks
+        )
+        flav_ids = await self._flavor_ids([platform], beta, additional_flavors)
+        versions = await self._modularity_versions(platform, flav_ids)
+        if not versions:
+            raise ValueError(
+                f"Platform '{platform}' has no modularity versions on ALBS — "
+                f"module builds are not supported there."
+            )
+        if module_platform_version is None:
+            module_platform_version = versions[-1]
+        elif module_platform_version not in versions:
+            raise ValueError(
+                f"Unknown module_platform_version '{module_platform_version}' "
+                f"for {platform}. Available: {versions}"
+            )
+        preview = await self.get_module_preview(
+            module_url, branch, platform,
+            platform_entries[0]["arch_list"], flav_ids,
+        )
+        task = build_module_task(
+            preview, dependency_streams, module_platform_version, module_version
+        )
+        data: dict[str, Any] = {
+            "platforms": platform_entries,
+            "tasks": [task],
+            "is_secure_boot": False,
+            "product_id": 1,
+        }
+        if linked_builds:
+            data["linked_builds"] = linked_builds
+        mock_options = self._build_mock_options(excludes, definitions)
+        if mock_options:
+            data["mock_options"] = mock_options
+        if flav_ids:
+            data["platform_flavors"] = flav_ids
+        return await self._post_build(data), task
+
+    async def _post_build(self, data: dict[str, Any]) -> dict[str, Any]:
         r = await self._http.post(
             f"{ALBS_API}/builds/", json=data, headers=self._auth_headers
         )
         r.raise_for_status()
         return r.json()
+
+    async def _platform_entries(
+        self,
+        platforms: list[str],
+        arch_list: list[str] | None,
+        independent_tasks: bool,
+    ) -> list[dict[str, Any]]:
+        """Validate platforms + arches against ALBS; build payload entries."""
+        platform_arches = await self.get_platform_arches()
+        entries: list[dict[str, Any]] = []
+        for plat in platforms:
+            if plat not in platform_arches:
+                raise ValueError(
+                    f"Unknown platform '{plat}'. "
+                    f"Available: {', '.join(sorted(platform_arches))}"
+                )
+            allowed = platform_arches[plat]
+            arches = arch_list or allowed
+            bad = [a for a in arches if a not in allowed]
+            if bad:
+                raise ValueError(
+                    f"Arch(es) {bad} not allowed for {plat}. Allowed: {allowed}"
+                )
+            entries.append({
+                "name": plat,
+                "arch_list": arches,
+                "parallel_mode_enabled": True,
+                "independent_tasks": independent_tasks,
+            })
+        return entries
+
+    @staticmethod
+    def _build_mock_options(
+        excludes: list[str] | None = None,
+        definitions: dict[str, str] | None = None,
+        with_opts: list[str] | None = None,
+        without_opts: list[str] | None = None,
+        modules: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build-level mock_options; empty values are left out."""
+        options = {
+            "yum_exclude": excludes,
+            "definitions": definitions,
+            "with": with_opts,
+            "without": without_opts,
+            "module_enable": modules,
+        }
+        return {k: v for k, v in options.items() if v}
+
+    async def _flavor_ids(
+        self,
+        platforms: list[str],
+        beta: bool,
+        additional_flavors: list[str] | None,
+    ) -> list[int]:
+        """Resolve beta + named flavors to ALBS ids (validated, de-duplicated)."""
+        if not beta and not additional_flavors:
+            return []
+        flavors = await self.get_flavors()
+        flav_ids: list[int] = []
+        if beta:
+            unsupported = [
+                p for p in platforms if p not in BETA_PLATFORM_FLAVORS
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"beta=True is not supported for platform(s) "
+                    f"{unsupported}. Platforms with a known beta flavor: "
+                    f"{sorted(BETA_PLATFORM_FLAVORS)}. "
+                    f"Pass additional_flavors=[...] explicitly if you need "
+                    f"a non-standard beta flavor."
+                )
+            wanted: list[str] = []
+            for plat in platforms:
+                wanted.extend(BETA_PLATFORM_FLAVORS[plat])
+            # Validate the predefined names against the live API —
+            # never trust constants without verifying (per AGENTS.md).
+            missing = [n for n in wanted if n not in flavors]
+            if missing:
+                raise ValueError(
+                    f"Beta flavor(s) {missing} from BETA_PLATFORM_FLAVORS "
+                    f"are not present on ALBS. The constant is stale — "
+                    f"update src/albs_mcp/constants.py. "
+                    f"Available: {sorted(flavors)}"
+                )
+            flav_ids.extend(flavors[n] for n in wanted)
+        if additional_flavors:
+            unknown = [f for f in additional_flavors if f not in flavors]
+            if unknown:
+                raise ValueError(
+                    f"Unknown flavor(s): {unknown}. "
+                    f"Available: {sorted(flavors)}"
+                )
+            flav_ids.extend(flavors[f] for f in additional_flavors)
+        seen: set[int] = set()
+        return [i for i in flav_ids if not (i in seen or seen.add(i))]
+
+    async def _modularity_versions(
+        self, platform: str, flavor_ids: list[int]
+    ) -> list[str]:
+        """Modularity platform versions ('8.4' … '8.10') usable for a module.
+
+        Ordered so the last one is the default ALBS and its UI pick: the
+        platform's newest, unless a selected flavor (e.g. a beta) brings its
+        own versions — then that flavor's newest.
+        """
+        record = next(
+            (p for p in await self.get_platforms() if p["name"] == platform),
+            None,
+        )
+        if record is None or not record.get("modularity"):
+            return []
+        names = [v["name"] for v in (record.get("data") or {}).get("versions", [])]
+        if flavor_ids:
+            for flavor in await self.get_flavor_records():
+                if flavor["id"] not in flavor_ids:
+                    continue
+                for v in (flavor.get("data") or {}).get("versions", []):
+                    if v["name"] in names:
+                        names.remove(v["name"])
+                    names.append(v["name"])
+        return names
 
     async def sign_build(self, build_id: int, sign_key_id: int = 4) -> dict[str, Any]:
         r = await self._http.post(

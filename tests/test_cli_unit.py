@@ -71,6 +71,7 @@ def test_parser_has_subcommands():
     assert "failed-tasks" in choices
     assert "search" in choices
     assert "create-build" in choices
+    assert "create-module-build" in choices
     assert "sign-build" in choices
 
 
@@ -736,3 +737,37 @@ def test_preview_errata_has_no_force():
         parser.parse_args([
             "preview-errata", "94160", "--cve", "CVE-2026-109618", "--force",
         ])
+
+
+
+# ── create-module-build ───────────────────────────────────────────────
+
+
+def test_create_module_build():
+    with patch("albs_mcp._commands.create_module_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Module build created successfully!\nBuild ID: 100700"
+        code, out = _invoke([
+            "create-module-build", "AlmaLinux-8", "perl-DBI", "c8-stream-1.641",
+            "--stream", "perl:5.26", "--arch", "x86_64",
+            "--platform-version", "8.10", "--skip-tests",
+        ])
+    assert code == 0
+    assert "100700" in out
+    kw = mock.call_args[1]
+    assert kw["platform"] == "AlmaLinux-8"
+    assert kw["module"] == "perl-DBI"
+    assert kw["branch"] == "c8-stream-1.641"
+    assert kw["dependency_streams"] == ["perl:5.26"]
+    assert kw["arch_list"] == ["x86_64"]
+    assert kw["module_platform_version"] == "8.10"
+    assert kw["skip_tests"] is True
+
+
+def test_create_module_build_error_exit_code():
+    with patch("albs_mcp._commands.create_module_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Error: Module perl-DBI:1.641 depends on ['perl'] without a stream"
+        code, out = _invoke([
+            "create-module-build", "AlmaLinux-8", "perl-DBI", "c8-stream-1.641",
+        ])
+    assert code != 0
+    assert mock.call_args[1]["dependency_streams"] is None

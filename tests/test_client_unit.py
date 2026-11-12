@@ -9,6 +9,7 @@ import pytest
 
 from albs_mcp.client import (
     ALBSClient,
+    build_module_task,
     clip_line,
     extract_el_version,
     get_completed_task_ids,
@@ -1576,3 +1577,255 @@ async def test_create_errata_posts_with_auth(client):
 async def test_create_errata_no_token(client_no_token):
     with pytest.raises(PermissionError):
         await client_no_token.create_errata({"id": "ALSA-2026:A011"})
+
+
+
+# ── module builds ─────────────────────────────────────────────────────
+
+PERL_DBI_PREVIEW = {
+    "refs": [{
+        "url": "https://git.almalinux.org/rpms/perl-DBI.git",
+        "git_ref": "c8-stream-1.641",
+        "exist": True,
+        "enabled": True,
+        "added_artifacts": [],
+        "mock_options": {"definitions": {"_without_perl_DBI_enables_coro": "1"}},
+        "ref_type": 1,
+    }],
+    "module_name": "perl-DBI",
+    "module_stream": "1.641",
+    "modules_yaml": "---\ndocument: modulemd\n...",
+    "enabled_modules": {"buildtime": ["perl:"], "runtime": ["perl:"]},
+    "git_ref": "c8-stream-1.641",
+}
+
+AL8_PLATFORM = {
+    "id": 1, "name": "AlmaLinux-8",
+    "arch_list": ["i686", "x86_64", "aarch64", "ppc64le", "s390x"],
+    "modularity": {"git_tag_prefix": {"modified": "a8", "non_modified": "c8"}},
+    "data": {"versions": [{"name": "8.9"}, {"name": "8.10"}]},
+}
+
+
+def test_build_module_task_matches_the_ui_payload():
+    """perl:5.24 picked for perl: [] — same as build 94028 made in the UI."""
+    task = build_module_task(PERL_DBI_PREVIEW, ["perl:5.24"], "8.10")
+    assert task["enabled_modules"] == {
+        "buildtime": ["perl:5.24"], "runtime": ["perl:5.24"],
+    }
+    ref = task["refs"][0]
+    assert ref["mock_options"]["module_enable"] == [
+        "perl-DBI:1.641", "perl-DBI-devel:1.641", "perl:5.24",
+    ]
+    assert ref["mock_options"]["definitions"] == {
+        "_without_perl_DBI_enables_coro": "1",
+    }
+    assert ref["test_configuration"] == {}
+    assert task["module_name"] == "perl-DBI"
+    assert task["module_stream"] == "1.641"
+    assert task["module_platform_version"] == "8.10"
+    assert task["module_version"] is None
+    assert task["modules_yaml"] == PERL_DBI_PREVIEW["modules_yaml"]
+    # the preview itself is not mutated
+    assert "module_enable" not in PERL_DBI_PREVIEW["refs"][0]["mock_options"]
+
+
+def test_build_module_task_refuses_a_dependency_without_stream():
+    with pytest.raises(ValueError, match=r"\['perl'\].*dependency_streams"):
+        build_module_task(PERL_DBI_PREVIEW, None, "8.10")
+
+
+@pytest.mark.parametrize("bad", ["perl", "perl:", ":5.26"])
+def test_build_module_task_rejects_malformed_stream(bad):
+    with pytest.raises(ValueError, match="name:stream"):
+        build_module_task(PERL_DBI_PREVIEW, [bad], "8.10")
+
+
+def test_build_module_task_rejects_two_streams_for_one_module():
+    with pytest.raises(ValueError, match="one build per stream"):
+        build_module_task(PERL_DBI_PREVIEW, ["perl:5.26", "perl:5.30"], "8.10")
+
+
+def test_build_module_task_keeps_template_streams_and_overrides():
+    preview = dict(PERL_DBI_PREVIEW, enabled_modules={
+        "buildtime": ["perl:5.26", "perl-YAML:"],
+        "runtime": ["perl:5.26"],
+    })
+    task = build_module_task(
+        preview, ["perl:5.30", "perl-YAML:1.24", "nodejs:18"], "8.10",
+    )
+    assert task["enabled_modules"] == {
+        "buildtime": ["perl:5.30", "perl-YAML:1.24"], "runtime": ["perl:5.30"],
+    }
+    # nodejs is not in the template: enabled in mock only
+    assert task["refs"][0]["mock_options"]["module_enable"] == [
+        "perl-DBI:1.641", "perl-DBI-devel:1.641",
+        "perl:5.30", "perl-YAML:1.24", "nodejs:18",
+    ]
+
+
+def test_build_module_task_devel_module_gets_no_second_devel():
+    preview = dict(PERL_DBI_PREVIEW, module_name="perl-DBI-devel")
+    task = build_module_task(preview, ["perl:5.26"], "8.10")
+    assert task["refs"][0]["mock_options"]["module_enable"][:2] == [
+        "perl-DBI-devel:1.641", "perl:5.26",
+    ]
+
+
+def test_build_module_task_all_refs_disabled():
+    preview = dict(PERL_DBI_PREVIEW, refs=[
+        dict(PERL_DBI_PREVIEW["refs"][0], enabled=False),
+    ])
+    with pytest.raises(ValueError, match="already built"):
+        build_module_task(preview, ["perl:5.26"], "8.10")
+
+
+def test_build_module_task_missing_component_branch():
+    preview = dict(PERL_DBI_PREVIEW, refs=[
+        dict(PERL_DBI_PREVIEW["refs"][0], exist=False),
+    ])
+    with pytest.raises(ValueError, match="does not exist"):
+        build_module_task(preview, ["perl:5.26"], "8.10")
+
+
+@pytest.mark.asyncio
+async def test_get_module_preview_posts_branch_ref(client):
+    client._http.post = AsyncMock(return_value=_mock_response(PERL_DBI_PREVIEW))
+    result = await client.get_module_preview(
+        "https://git.almalinux.org/modules/perl-DBI.git", "c8-stream-1.641",
+        "AlmaLinux-8", ["x86_64"], [8],
+    )
+    assert result["module_name"] == "perl-DBI"
+    url = client._http.post.call_args[0][0]
+    assert url == f"{ALBS_API}/builds/get_module_preview/"
+    kwargs = client._http.post.call_args[1]
+    assert kwargs["json"] == {
+        "ref": {
+            "url": "https://git.almalinux.org/modules/perl-DBI.git",
+            "git_ref": "c8-stream-1.641",
+            "ref_type": 1,
+        },
+        "platform_name": "AlmaLinux-8",
+        "platform_arches": ["x86_64"],
+        "flavors": [8],
+    }
+    assert kwargs["headers"] == {"authorization": "Bearer test-token-123"}
+
+
+@pytest.mark.asyncio
+async def test_get_module_preview_no_token(client_no_token):
+    with pytest.raises(PermissionError):
+        await client_no_token.get_module_preview("u", "b", "AlmaLinux-8", [])
+
+
+def _module_client(client):
+    client._platforms_cache = {"AlmaLinux-8": AL8_PLATFORM["arch_list"]}
+    client.get_platforms = AsyncMock(return_value=[AL8_PLATFORM])
+    client._http.post = AsyncMock(side_effect=[
+        _mock_response(PERL_DBI_PREVIEW),
+        _mock_response({"id": 100700, "created_at": "2026-11-12T00:00:00"}),
+    ])
+    return client
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_payload(client):
+    _module_client(client)
+    result, task = await client.create_module_build(
+        "https://git.almalinux.org/modules/perl-DBI.git", "c8-stream-1.641",
+        "AlmaLinux-8", dependency_streams=["perl:5.26"],
+        definitions={"__spec_check_template": "exit 0;"},
+    )
+    assert result["id"] == 100700
+    preview_call, build_call = client._http.post.call_args_list
+    assert preview_call[1]["json"]["platform_arches"] == AL8_PLATFORM["arch_list"]
+    assert build_call[0][0] == f"{ALBS_API}/builds/"
+    data = build_call[1]["json"]
+    assert data["platforms"] == [{
+        "name": "AlmaLinux-8",
+        "arch_list": AL8_PLATFORM["arch_list"],
+        "parallel_mode_enabled": True,
+        "independent_tasks": False,
+    }]
+    assert data["tasks"] == [task]
+    assert task["module_platform_version"] == "8.10"
+    assert task["enabled_modules"]["buildtime"] == ["perl:5.26"]
+    assert data["mock_options"] == {
+        "definitions": {"__spec_check_template": "exit 0;"},
+    }
+    assert "platform_flavors" not in data
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_without_stream_posts_nothing(client):
+    _module_client(client)
+    with pytest.raises(ValueError, match="without a stream"):
+        await client.create_module_build(
+            "https://git.almalinux.org/modules/perl-DBI.git",
+            "c8-stream-1.641", "AlmaLinux-8",
+        )
+    # only the preview was requested, no build was created
+    assert client._http.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_platform_version(client):
+    _module_client(client)
+    _, task = await client.create_module_build(
+        "u", "c8-stream-1.641", "AlmaLinux-8",
+        dependency_streams=["perl:5.26"], module_platform_version="8.9",
+    )
+    assert task["module_platform_version"] == "8.9"
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_unknown_platform_version(client):
+    _module_client(client)
+    with pytest.raises(ValueError, match="8.10"):
+        await client.create_module_build(
+            "u", "c8-stream-1.641", "AlmaLinux-8",
+            dependency_streams=["perl:5.26"], module_platform_version="8.99",
+        )
+    client._http.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_beta_flavor_version(client):
+    _module_client(client)
+    client.get_flavor_records = AsyncMock(return_value=[
+        {"id": 8, "name": "AlmaLinux-8-beta",
+         "data": {"versions": [{"name": "8.10"}]}},
+        {"id": 9, "name": "other", "data": {"versions": [{"name": "8.11"}]}},
+    ])
+    with patch("albs_mcp.client.BETA_PLATFORM_FLAVORS",
+               {"AlmaLinux-8": ["AlmaLinux-8-beta"]}):
+        _, task = await client.create_module_build(
+            "u", "c8-stream-1.641", "AlmaLinux-8",
+            dependency_streams=["perl:5.26"], beta=True,
+        )
+    assert task["module_platform_version"] == "8.10"
+    data = client._http.post.call_args_list[1][1]["json"]
+    assert data["platform_flavors"] == [8]
+    assert client._http.post.call_args_list[0][1]["json"]["flavors"] == [8]
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_non_modular_platform(client):
+    client._platforms_cache = {"AlmaLinux-10": ["x86_64"]}
+    client.get_platforms = AsyncMock(return_value=[{
+        "id": 3, "name": "AlmaLinux-10", "arch_list": ["x86_64"],
+        "modularity": None, "data": {"versions": [{"name": "10.0"}]},
+    }])
+    client._http.post = AsyncMock()
+    with pytest.raises(ValueError, match="no modularity"):
+        await client.create_module_build("u", "b", "AlmaLinux-10")
+    client._http.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_bad_arch(client):
+    _module_client(client)
+    with pytest.raises(ValueError, match="not allowed"):
+        await client.create_module_build(
+            "u", "b", "AlmaLinux-8", arch_list=["riscv64"],
+        )

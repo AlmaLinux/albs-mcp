@@ -1168,6 +1168,98 @@ def _cve_from_rh(data: dict) -> dict:
     }
 
 
+def _vex_date(timestamp: str | None) -> str | None:
+    """'2026-11-18T15:23:29.008000+00:00' → '2026-11-18T15:23:29Z', the form
+    of the per-CVE JSON's public_date."""
+    if not timestamp:
+        return None
+    moment = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _csaf_purls(node: dict) -> dict[str, str]:
+    """{product_id: purl} of every product in a CSAF product tree."""
+    found: dict[str, str] = {}
+    for branch in node.get("branches") or []:
+        found.update(_csaf_purls(branch))
+    product = node.get("product") or {}
+    purl = (product.get("product_identification_helper") or {}).get("purl")
+    if purl:
+        found[product["product_id"]] = purl
+    return found
+
+
+def _cve_from_vex(data: dict) -> dict:
+    """Normalize a Red Hat CSAF VEX document of one CVE to what an advisory
+    needs — the same shape as _cve_from_rh.
+
+    Affected packages are every product not marked known_not_affected; a
+    product ID ("red_hat_enterprise_linux_8:nginx::nginx:1.24") points via
+    the relationships to a component whose purl names the package and,
+    for a modular one, the module stream (`rpmmod=nginx:1.24`).
+    """
+    vuln = data["vulnerabilities"][0]
+    cve_id = vuln["cve"]
+    public = _vex_date(vuln.get("release_date"))
+    if not public:
+        raise ValueError(f"{cve_id} has no release date in Red Hat VEX data.")
+    impact = next(
+        (t.get("details") for t in vuln.get("threats") or []
+         if t.get("category") == "impact"),
+        None,
+    ) or (data["document"].get("aggregate_severity") or {}).get("text")
+    tree = data.get("product_tree") or {}
+    purls = _csaf_purls(tree)
+    component = {
+        r["full_product_name"]["product_id"]: r["product_reference"]
+        for r in tree.get("relationships") or []
+    }
+    names: set[str] = set()
+    modules: set[str] = set()
+    for status, product_ids in (vuln.get("product_status") or {}).items():
+        if status == "known_not_affected":
+            continue
+        for product_id in product_ids:
+            purl = purls.get(component.get(product_id, product_id), "")
+            name = re.match(r"pkg:rpm/[^/]+/([^@?]+)", purl)
+            if name:
+                names.add(name.group(1))
+            module = re.search(r"[?&]rpmmod=([^:&]+):([^:&]+)", purl)
+            if module:
+                modules.add(f"{module.group(1)}:{module.group(2)}")
+    cvss3 = next(
+        (s["cvss_v3"].get("vectorString") for s in vuln.get("scores") or []
+         if s.get("cvss_v3")),
+        None,
+    )
+    summary = next(
+        (n["text"] for n in vuln.get("notes") or [] if n.get("category") == "summary"),
+        None,
+    )
+    bugzilla_id = next(
+        (i["text"] for i in vuln.get("ids") or []
+         if i.get("system_name") == "Red Hat Bugzilla ID"),
+        None,
+    )
+    bugzilla_url = next(
+        (r["url"] for r in vuln.get("references") or []
+         if bugzilla_id and r.get("summary") == f"RHBZ#{bugzilla_id}"),
+        None,
+    )
+    return {
+        "id": cve_id,
+        "impact": _severity(impact, cve_id),
+        "public": public,
+        "cvss3": cvss3,
+        "cwe": (vuln.get("cwe") or {}).get("id"),
+        "summary": summary,
+        "bugzilla_id": bugzilla_id,
+        "bugzilla_url": bugzilla_url,
+        "packages": names,
+        "modules": modules,
+    }
+
+
 def _csaf_source_purls(node: dict) -> Iterator[str]:
     """Package URLs of every source RPM in a CSAF product tree."""
     for branch in node.get("branches") or []:
@@ -1296,12 +1388,26 @@ async def _load_security_data(
     infos = []
     for cve_id in cve_ids:
         try:
-            data = await client.get_rh_cve(cve_id)
+            infos.append(_cve_from_rh(await client.get_rh_cve(cve_id)))
+            continue
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise _CommandError(
+                    _api_error(f"getting Red Hat data for {cve_id}", e)
+                ) from e
         except Exception as e:
             raise _CommandError(
                 _api_error(f"getting Red Hat data for {cve_id}", e)
             ) from e
-        infos.append(_cve_from_rh(data))
+        # Not in the per-CVE JSON yet: a fresh CVE is there only hours after
+        # its VEX document.
+        try:
+            data = await client.get_rh_cve_vex(cve_id)
+        except Exception as e:
+            raise _CommandError(
+                _api_error(f"getting Red Hat data (VEX) for {cve_id}", e)
+            ) from e
+        infos.append(_cve_from_vex(data))
     return {
         "label": ", ".join(cve_ids),
         "severity": max(

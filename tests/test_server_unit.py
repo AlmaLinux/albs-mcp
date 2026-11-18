@@ -1696,6 +1696,66 @@ ERRATA_RECORD = {
 }
 
 
+# A fresh CVE: only its CSAF VEX document exists, the per-CVE JSON is 404.
+RH_VEX_KERNEL = {
+    "document": {
+        "aggregate_severity": {"text": "Critical"},
+        "tracking": {"id": "CVE-2026-50001"},
+    },
+    "product_tree": {
+        "branches": [{"branches": [
+            {"product": {
+                "product_id": "kernel.src",
+                "product_identification_helper": {"purl": "pkg:rpm/redhat/kernel?arch=src"},
+            }},
+            {"product": {
+                "product_id": "nodejs::nodejs:24",
+                "product_identification_helper": {"purl": "pkg:rpm/redhat/nodejs?rpmmod=nodejs:24"},
+            }},
+            {"product": {
+                "product_id": "kmod-foo.src",
+                "product_identification_helper": {"purl": "pkg:rpm/redhat/kmod-foo?arch=src"},
+            }},
+        ]}],
+        "relationships": [
+            {"full_product_name": {"product_id": "red_hat_enterprise_linux_8:kernel.src"},
+             "product_reference": "kernel.src"},
+            {"full_product_name": {"product_id": "red_hat_enterprise_linux_9:nodejs::nodejs:24"},
+             "product_reference": "nodejs::nodejs:24"},
+            {"full_product_name": {"product_id": "red_hat_enterprise_linux_8:kmod-foo.src"},
+             "product_reference": "kmod-foo.src"},
+        ],
+    },
+    "vulnerabilities": [{
+        "cve": "CVE-2026-50001",
+        "cwe": {"id": "CWE-787", "name": "Out-of-bounds Write"},
+        "ids": [{"system_name": "Red Hat Bugzilla ID", "text": "2575895"}],
+        "notes": [
+            {"category": "description", "text": "A flaw was found in the kernel."},
+            {"category": "summary", "text": "kernel: heap overflow in foo"},
+        ],
+        "references": [
+            {"category": "self", "summary": "Canonical URL",
+             "url": "https://access.redhat.com/security/cve/CVE-2026-50001"},
+            {"category": "external", "summary": "RHBZ#2575895",
+             "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2575895"},
+        ],
+        "release_date": "2026-11-18T15:23:29.008000+00:00",
+        "product_status": {
+            "known_affected": [
+                "red_hat_enterprise_linux_8:kernel.src",
+                "red_hat_enterprise_linux_9:nodejs::nodejs:24",
+            ],
+            "known_not_affected": ["red_hat_enterprise_linux_8:kmod-foo.src"],
+        },
+        "scores": [{"cvss_v3": {
+            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        }}],
+        "threats": [{"category": "impact", "details": "Critical"}],
+    }],
+}
+
+
 @pytest.fixture
 def errata_client(mock_client):
     cves = {
@@ -1710,6 +1770,7 @@ def errata_client(mock_client):
     mock_client.jwt_token = "token"
     mock_client.get_build = AsyncMock(side_effect=lambda b: ERRATA_BUILDS[b])
     mock_client.get_rh_cve = AsyncMock(side_effect=get_rh_cve)
+    mock_client.get_rh_cve_vex = AsyncMock(side_effect=_http_status_error(404))
     mock_client.get_rh_advisory = AsyncMock(return_value=RH_CSAF_KERNEL)
     mock_client.list_alma_errata_ids = AsyncMock(return_value=[
         f"ALSA-2026:A{i:03d}" for i in range(1, 11)
@@ -2413,6 +2474,75 @@ def test_cve_from_rh_ignores_not_affected_states():
         ],
     })
     assert info["packages"] == {"kernel-rt"}
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_falls_back_to_vex(errata_client):
+    """A CVE not in the per-CVE JSON yet (404) is read from its VEX document."""
+    errata_client.get_rh_cve_vex = AsyncMock(return_value=RH_VEX_KERNEL)
+    result = await preview_errata(
+        [60001], issued_date="2026-11-18", cves=["CVE-2026-50001"]
+    )
+    assert not result.startswith("Error"), result
+    errata_client.get_rh_cve.assert_awaited_once_with("CVE-2026-50001")
+    errata_client.get_rh_cve_vex.assert_awaited_once_with("CVE-2026-50001")
+    assert '"Critical: kernel security update"' in result
+    assert "Source packages: kernel" in result
+    # known_not_affected kmod-foo stays out.
+    assert "Left out (not affected): kmod-foo" in result
+    assert "CVE-2026-50001  Critical  CVSS:3.1/AV:N/AC:H" in result
+    assert "CWE-787" in result
+    assert "public 2026-11-18T15:23:29Z" in result
+    assert "bugzilla 2575895" in result
+    assert "* kernel: heap overflow in foo (CVE-2026-50001)" in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_cve_unknown_to_red_hat(errata_client):
+    result = await preview_errata(
+        [60001], issued_date="2026-11-18", cves=["CVE-2026-50001"]
+    )
+    assert result.startswith("Error")
+    assert "VEX" in result and "CVE-2026-50001" in result
+    errata_client.get_build.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_no_vex_fallback_on_server_error(errata_client):
+    """Only a 404 means "not published yet"; other errors are reported."""
+    errata_client.get_rh_cve = AsyncMock(side_effect=_http_status_error(503))
+    result = await preview_errata(
+        [60001], issued_date="2026-11-18", cves=["CVE-2026-31431"]
+    )
+    assert result.startswith("Error")
+    errata_client.get_rh_cve_vex.assert_not_called()
+
+
+def test_cve_from_vex():
+    info = commands_module._cve_from_vex(RH_VEX_KERNEL)
+    assert info == {
+        "id": "CVE-2026-50001",
+        "impact": "Critical",
+        "public": "2026-11-18T15:23:29Z",
+        "cvss3": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "cwe": "CWE-787",
+        "summary": "kernel: heap overflow in foo",
+        "bugzilla_id": "2575895",
+        "bugzilla_url": "https://bugzilla.redhat.com/show_bug.cgi?id=2575895",
+        "packages": {"kernel", "nodejs"},
+        "modules": {"nodejs:24"},
+    }
+
+
+def test_cve_from_vex_without_bugzilla_or_threats():
+    """No bugzilla yet; severity then comes from the document's aggregate."""
+    vuln = {
+        k: v for k, v in RH_VEX_KERNEL["vulnerabilities"][0].items()
+        if k not in ("ids", "threats")
+    }
+    info = commands_module._cve_from_vex({**RH_VEX_KERNEL, "vulnerabilities": [vuln]})
+    assert info["impact"] == "Critical"
+    assert info["bugzilla_id"] is None and info["bugzilla_url"] is None
 
 
 def test_title_subjects():

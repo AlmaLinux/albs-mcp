@@ -1564,7 +1564,7 @@ def test_get_whole_package_task_ids_all_complete():
 
 # ── errata ────────────────────────────────────────────────────────────
 
-from albs_mcp.constants import RH_CSAF_BASE, RH_CVE_API  # noqa: E402
+from albs_mcp.constants import RH_CSAF_BASE, RH_CVE_API, RH_VEX_BASE  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -1626,6 +1626,21 @@ async def test_get_rh_cve_url(client):
     assert data == {"name": "CVE-2026-1"}
     client._http.get.assert_called_once_with(f"{RH_CVE_API}/CVE-2026-31431.json")
 
+
+
+@pytest.mark.asyncio
+async def test_get_rh_cve_vex_url(client):
+    client._http.get = AsyncMock(return_value=_mock_response({"document": {}}))
+    await client.get_rh_cve_vex("CVE-2026-123007")
+    client._http.get.assert_called_once_with(
+        f"{RH_VEX_BASE}/2026/cve-2026-123007.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_rh_cve_vex_rejects_bad_id(client):
+    with pytest.raises(ValueError):
+        await client.get_rh_cve_vex("CVE-26-1/../x")
 
 @pytest.mark.asyncio
 async def test_get_rh_advisory_csaf_url(client):

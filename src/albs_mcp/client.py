@@ -13,6 +13,7 @@ from .constants import (
     ALBS_LOGS_BASE,
     BETA_PLATFORM_FLAVORS,
     BUILD_TASK_COMPLETED,
+    CVE_ID_PATTERN,
     LOG_CLIP_LEAD_CHARS,
     LOG_MAX_LINE_CHARS,
     LOG_MAX_RESULT_CHARS,
@@ -24,6 +25,7 @@ from .constants import (
     RH_ADVISORY_ID_PATTERN,
     RH_CSAF_BASE,
     RH_CVE_API,
+    RH_VEX_BASE,
     SECURE_BOOT_PACKAGES,
 )
 
@@ -418,6 +420,18 @@ class ALBSClient:
         """Red Hat security data for one CVE (severity, CVSS, CWE, bugzilla,
         affected packages). 404 when Red Hat has no record of the CVE."""
         r = await self._http.get(f"{RH_CVE_API}/{cve_id}.json")
+        r.raise_for_status()
+        return r.json()
+
+    async def get_rh_cve_vex(self, cve_id: str) -> dict[str, Any]:
+        """CSAF VEX document of one CVE, e.g. .../vex/2026/cve-2026-31431.json.
+        Published before the per-CVE JSON of get_rh_cve; 404 when Red Hat
+        has no record of the CVE."""
+        match = re.fullmatch(CVE_ID_PATTERN, cve_id)
+        if not match:
+            raise ValueError(f"Invalid CVE ID: {cve_id!r}")
+        year = cve_id.split("-")[1]
+        r = await self._http.get(f"{RH_VEX_BASE}/{year}/{cve_id.lower()}.json")
         r.raise_for_status()
         return r.json()
 

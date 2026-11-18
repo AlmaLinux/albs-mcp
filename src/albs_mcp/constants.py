@@ -200,8 +200,11 @@ BETA_PLATFORM_FLAVORS: dict[str, list[str]] = {
 
 # Red Hat security data: per-CVE JSON (severity, CVSS, CWE, bugzilla, the
 # packages it affects) and per-advisory CSAF documents (RHSA title, details,
-# CVE list, source packages).
+# CVE list, source packages). A fresh CVE reaches the per-CVE JSON hours
+# after its CSAF VEX document (the data the CVE page on the portal shows),
+# so the VEX document is the fallback when the JSON answers 404.
 RH_CVE_API = "https://access.redhat.com/hydra/rest/securitydata/cve"
+RH_VEX_BASE = "https://security.access.redhat.com/data/csaf/v2/vex"
 RH_CSAF_BASE = "https://security.access.redhat.com/data/csaf/v2/advisories"
 RH_CVE_PAGE = "https://access.redhat.com/security/cve"
 RH_BUGZILLA = "https://bugzilla.redhat.com/show_bug.cgi?id="

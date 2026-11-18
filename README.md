@@ -386,6 +386,8 @@ How each field is filled:
 | Title | `<package> security update` — the module stream for modular builds (`nodejs:24 security update`); with an RHSA, the RHSA title. ALBS adds the `Important:` prefix |
 | Description | CVEs: the package text from the newest earlier security advisory for the package (same platform first, then any; another stream of the module if needed) + a `Security Fix(es):` list from the Red Hat bugzilla summaries. RHSA: its details text (Red Hat branding replaced) |
 | CVE information, References | Each CVE (Red Hat CVE page, with CVSS v3, CWE, impact, public date) and its Red Hat bugzilla |
+
+CVE data comes from Red Hat's per-CVE JSON (`hydra/rest/securitydata/cve`). A fresh CVE appears there hours after its CSAF VEX document (the data behind the CVE page on the portal), so on a 404 the CVE is read from the VEX document instead (`security.access.redhat.com/data/csaf/v2/vex`). A CVE that has no bugzilla yet gets only its CVE reference.
 | Module | `name:stream` of a modular build (from its tasks' module metadata, `-devel` excluded); empty otherwise |
 | Packages | Binary RPMs of the named package (or module) from the build(s) — no src/debuginfo/debugsource, other packages in the build left out. Without `package`: the packages Red Hat lists as affected (RHSA: its source packages) |
 
@@ -404,7 +406,7 @@ The preview adds a `NOTE` when Red Hat does not tie one of the given CVEs to the
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 382 tests)
+# Unit tests (no network, 389 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
 # Integration tests (hits real ALBS API, read-only, 38 tests)

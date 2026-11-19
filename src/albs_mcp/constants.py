@@ -5,6 +5,8 @@ ALBS_LOGS_BASE = f"{ALBS_URL}/pulp/content/build_logs"
 # Module git repos (modules.yaml per branch, e.g. c8-stream-1.641) — what the
 # ALBS UI lists under /projects/alma/modularity.
 MODULES_GIT_BASE = "https://git.almalinux.org/modules"
+# Gitea API of git.almalinux.org (public reads: branches, tags).
+GIT_API = "https://git.almalinux.org/api/v1"
 # /builds/get_module_preview/ queries gitea + beholder per component; slow.
 MODULE_PREVIEW_TIMEOUT = 120.0
 

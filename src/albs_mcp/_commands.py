@@ -1122,9 +1122,17 @@ async def create_module_build(
     definitions: dict[str, str] | str | None = None,
     linked_builds: list[int] | None = None,
     independent_tasks: bool = False,
+    component_refs: list[str] | None = None,
 ) -> str:
     if not module or not branch or not platform:
         return "Error: platform, module and branch are required."
+    overrides: dict[str, str] = {}
+    for spec in component_refs or []:
+        name, _, ref = spec.partition("=")
+        if not name.strip() or not ref.strip():
+            return (f"Error: component ref {spec!r} must be in 'name=ref' form, "
+                    f"e.g. 'php=a8-stream-7.4'.")
+        overrides[name.strip()] = ref.strip()
     module = module.strip()
     if module.startswith(("http://", "https://")):
         module_url = module
@@ -1157,6 +1165,7 @@ async def create_module_build(
             definitions=defs,
             linked_builds=linked_builds,
             independent_tasks=independent_tasks,
+            component_refs=overrides or None,
         )
     except ValueError as e:
         return f"Error: {e}"

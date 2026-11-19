@@ -228,7 +228,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 |---|---|
 | `get_sign_keys` | List sign keys: ID, name, GPG keyid, active status, platform mappings |
 | `create_build` | Create a build: packages or custom Git URLs + platform(s) + branch/tag/srpm, with all mock options |
-| `create_module_build` | Create a module build: module repo + branch (`c8-stream-1.641`) + platform + `dependency_streams` (`perl:5.26`); payload as the web UI sends it |
+| `create_module_build` | Create a module build: module repo + branch (`c8-stream-1.641`) + platform + `dependency_streams` (`perl:5.26`); payload as the web UI sends it. `component_refs` (`php=a8-stream-7.4`) builds a component from another branch/tag than the preview's (checked in git) and forces it over ALBS's "reuse" |
 | `sign_build` | Create a sign task for a build with a chosen key |
 | `create_release_plan` | Create a *scheduled* release plan for a build + platform + product. **Never performs the actual release** — only the plan |
 | `create_errata` | Create AlmaLinux advisories (`ALSA-YYYY:Annn`) from a package + CVEs (or an RHSA) + build(s); everything else is filled automatically, IDs assigned right before creating; returns only once ALBS has stored each advisory. Refuses duplicates of existing advisories unless `force=True`. Does not release them |
@@ -335,6 +335,12 @@ create_module_build(platform="AlmaLinux-8", module="perl-DBI", branch="c8-stream
 
 `create_build(modules=[...])` is not a module build — it only enables modules in mock for a plain package build.
 
+ALBS's preview gives a component its `a8-stream-*` branch only when `autopatch/<name>` has one; php's AlmaLinux changes are committed straight in `rpms/php`, so its preview says `c8-stream-*`. Name the branch yourself:
+```
+create_module_build(platform="AlmaLinux-8", module="php", branch="c8-stream-7.4", component_refs=["php=a8-stream-7.4"])
+albs create-module-build AlmaLinux-8 php c8-stream-7.4 --component-ref php=a8-stream-7.4
+```
+
 ## Example: creating a release plan
 
 Ask the agent: *"Create a release plan for build 62316 on AlmaLinux-8."*
@@ -421,7 +427,7 @@ The preview adds a `NOTE` when Red Hat does not tie one of the given CVEs to the
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 429 tests)
+# Unit tests (no network, 437 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
 # Integration tests (hits real ALBS API, read-only, 41 tests)

@@ -3274,6 +3274,27 @@ async def test_create_module_build_tool_full_url_and_skip_tests(mock_client):
 
 
 @pytest.mark.asyncio
+async def test_create_module_build_tool_component_refs(mock_client):
+    await create_module_build(
+        platform="AlmaLinux-8", module="php", branch="c8-stream-7.4",
+        component_refs=["php=a8-stream-7.4", " php-pecl-apcu = a8-stream-7.4 "],
+    )
+    assert mock_client.create_module_build.call_args[1]["component_refs"] == {
+        "php": "a8-stream-7.4", "php-pecl-apcu": "a8-stream-7.4",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["php", "php=", "=a8-stream-7.4"])
+async def test_create_module_build_tool_malformed_component_ref(mock_client, bad):
+    result = await create_module_build(
+        platform="AlmaLinux-8", module="php", branch="c8-stream-7.4", component_refs=[bad],
+    )
+    assert result.startswith("Error:") and "name=ref" in result
+    mock_client.create_module_build.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_create_module_build_tool_validation_error(mock_client):
     mock_client.create_module_build = AsyncMock(side_effect=ValueError(
         "Module perl-DBI:1.641 depends on ['perl'] without a stream"

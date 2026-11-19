@@ -155,6 +155,7 @@ def _cmd_create_module_build(args: argparse.Namespace) -> None:
         definitions=args.definitions,
         linked_builds=args.linked_build or None,
         independent_tasks=args.independent_tasks,
+        component_refs=args.component_ref or None,
     ))
 
 
@@ -506,6 +507,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--independent-tasks", dest="independent_tasks", action="store_true",
         help="Build component tasks in parallel instead of chained.",
+    )
+    p.add_argument(
+        "--component-ref", action="append", default=[],
+        help='Build a component from this ref and build it even if ALBS would reuse it, '
+             'e.g. "php=a8-stream-7.4" (repeat).',
     )
     p.set_defaults(func=_cmd_create_module_build)
 

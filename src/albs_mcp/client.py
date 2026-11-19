@@ -6,6 +6,7 @@ import re
 from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -16,6 +17,7 @@ from .constants import (
     BUILD_CONFIGS_URL,
     BUILD_TASK_COMPLETED,
     CVE_ID_PATTERN,
+    GIT_API,
     LOG_CLIP_LEAD_CHARS,
     LOG_MAX_LINE_CHARS,
     LOG_MAX_RESULT_CHARS,
@@ -201,11 +203,22 @@ def _split_module(spec: str) -> tuple[str, str]:
     return name.strip(), stream.strip()
 
 
+def module_component(url: str, names: Any) -> str:
+    """The component a module ref builds: its repo slug, or the name of
+    *names* it stands for (a slug writes `+` as `plus` or `-`)."""
+    slug = url.rstrip("/").split("/")[-1].removesuffix(".git")
+    for name in names:
+        if slug in (name, name.replace("+", "plus"), name.replace("+", "-")):
+            return name
+    return slug
+
+
 def build_module_task(
     preview: dict[str, Any],
     dependency_streams: list[str] | None,
     module_platform_version: str,
     module_version: str | None = None,
+    component_refs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Turn a /builds/get_module_preview/ answer into a module build task.
 
@@ -222,6 +235,12 @@ def build_module_task(
     modules: perl:". A dependency_streams entry overrides the template
     stream; one for a module the template does not mention is only enabled
     in mock (like adding a module in the UI's module editor).
+
+    `component_refs` maps a component to the git ref to build it from, over
+    the preview's branch, and builds it even when ALBS would reuse it. The
+    preview puts the `a` branch only on components the `autopatch` org has
+    an `a<N>` branch of, so a package patched straight in rpms/ (php) comes
+    with its `c` branch. Fail-fast on a name that is no component.
     """
     name = preview["module_name"]
     stream = preview["module_stream"]
@@ -276,14 +295,26 @@ def build_module_task(
         if item not in module_enable:
             module_enable.append(item)
 
+    overrides = dict(component_refs or {})
     refs: list[dict[str, Any]] = []
     for ref in preview.get("refs") or []:
         ref = dict(ref)
+        component = module_component(ref.get("url") or "", overrides)
+        if component in overrides:
+            ref["git_ref"] = overrides.pop(component)
+            ref["enabled"] = True
+            ref["exist"] = True  # the preview checked its own branch; this one is checked by the caller
         mock_options = dict(ref.get("mock_options") or {})
         mock_options["module_enable"] = list(module_enable)
         ref["mock_options"] = mock_options
         ref["test_configuration"] = {}
         refs.append(ref)
+    if overrides:
+        names = sorted(module_component(r.get("url") or "", ()) for r in refs)
+        raise ValueError(
+            f"Not a component of {name}:{stream}: {', '.join(sorted(overrides))}. "
+            f"Components: {', '.join(names)}."
+        )
     enabled_refs = [r for r in refs if r.get("enabled", True)]
     if not enabled_refs:
         raise ValueError(
@@ -913,14 +944,16 @@ class ALBSClient:
         definitions: dict[str, str] | None = None,
         linked_builds: list[int] | None = None,
         independent_tasks: bool = False,
+        component_refs: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a module build the way the ALBS web UI does. Requires JWT.
 
         Validates the platform/arches/flavors, takes the module preview for
         `branch`, resolves the dependency streams (build_module_task) and
         posts one module task. ALBS then computes version, context and the
-        `.module_elX...` dist itself. Returns (created build, module task
-        that was sent).
+        `.module_elX...` dist itself. `component_refs` builds the named
+        components from the given refs (build_module_task); each one must
+        exist in git. Returns (created build, module task that was sent).
         """
         platform_entries = await self._platform_entries(
             [platform], arch_list, independent_tasks
@@ -944,8 +977,19 @@ class ALBSClient:
             platform_entries[0]["arch_list"], flav_ids,
         )
         task = build_module_task(
-            preview, dependency_streams, module_platform_version, module_version
+            preview, dependency_streams, module_platform_version, module_version,
+            component_refs,
         )
+        if component_refs:
+            missing = [
+                f"{r['url']} {r['git_ref']}" for r in task["refs"]
+                if module_component(r["url"], component_refs) in component_refs
+                and not await self.git_ref_exists(r["url"], r["git_ref"])
+            ]
+            if missing:
+                raise ValueError(
+                    f"Git ref does not exist on git.almalinux.org: {', '.join(missing)}."
+                )
         data: dict[str, Any] = {
             "platforms": platform_entries,
             "tasks": [task],
@@ -960,6 +1004,18 @@ class ALBSClient:
         if flav_ids:
             data["platform_flavors"] = flav_ids
         return await self._post_build(data), task
+
+    async def git_ref_exists(self, repo_url: str, ref: str) -> bool:
+        """Whether *ref* (a branch or tag) exists in a git.almalinux.org repo."""
+        path = repo_url.split("git.almalinux.org/", 1)[-1].rstrip("/").removesuffix(".git")
+        base = f"{GIT_API}/repos/{path}"
+        for kind in ("branches", "tags"):
+            r = await self._http.get(f"{base}/{kind}/{quote(ref, safe='')}")
+            if r.status_code == 200:
+                return True
+            if r.status_code != 404:
+                r.raise_for_status()
+        return False
 
     async def _post_build(self, data: dict[str, Any]) -> dict[str, Any]:
         r = await self._http.post(

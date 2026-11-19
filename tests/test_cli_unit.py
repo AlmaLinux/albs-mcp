@@ -782,6 +782,7 @@ def test_create_module_build():
             "create-module-build", "AlmaLinux-8", "perl-DBI", "c8-stream-1.641",
             "--stream", "perl:5.26", "--arch", "x86_64",
             "--platform-version", "8.10", "--skip-tests",
+            "--component-ref", "perl-DBI=a8-stream-1.641",
         ])
     assert code == 0
     assert "100700" in out
@@ -793,6 +794,7 @@ def test_create_module_build():
     assert kw["arch_list"] == ["x86_64"]
     assert kw["module_platform_version"] == "8.10"
     assert kw["skip_tests"] is True
+    assert kw["component_refs"] == ["perl-DBI=a8-stream-1.641"]
 
 
 def test_create_module_build_error_exit_code():

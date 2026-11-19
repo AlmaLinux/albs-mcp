@@ -108,6 +108,14 @@ stream with dependency_streams=["perl:5.26"], same platform and arches.
 get one through dependency_streams — the tool refuses otherwise. A build with \
 module_enable "perl:" (no stream) fails in mock with "missing groups or \
 modules: perl:". If the streams are unknown, ASK the user.
+4. Component branches come from ALBS's preview, which gives the a-branch \
+("a8-stream-…") only to components with an autopatch/<name> repo. A package \
+whose AlmaLinux changes are committed straight in rpms/<name> (php) comes with \
+its c-branch — Red Hat's code. When the user names the branch or tag a \
+component must build from (or its a-branch carries the change), pass \
+component_refs=["php=a8-stream-7.4"]: the ref replaces the preview's and the \
+component is built even when ALBS would reuse it. Check the result's \
+"Components" lines show the intended refs.
 
 ## Building EPEL packages (SRPMs from dl.fedoraproject.org/pub/epel/)
 When a user wants to build packages from EPEL SRPMs, you MUST handle the following \
@@ -673,6 +681,7 @@ async def create_module_build(
     definitions: dict[str, str] | None = None,
     linked_builds: list[int] | None = None,
     independent_tasks: bool = False,
+    component_refs: list[str] | None = None,
 ) -> str:
     """Create a MODULE build on ALBS (modular stream, e.g. perl-DBI:1.641 on
     AlmaLinux-8). Requires JWT token.
@@ -707,6 +716,12 @@ async def create_module_build(
         definitions: Extra build-level mock definitions.
         linked_builds: Build IDs to link.
         independent_tasks: Build component tasks in parallel, not chained.
+        component_refs: "component=git_ref" to build a component from another
+                branch or tag than the preview's, and build it even when ALBS
+                would reuse its released packages, e.g. ["php=a8-stream-7.4"].
+                ALBS's preview gives the a-branch only to components with an
+                autopatch/<name> repo; a package patched straight in rpms/
+                (php) comes with its c-branch. Each ref must exist in git.
     """
     return await cmd.create_module_build(
         platform=platform,
@@ -723,6 +738,7 @@ async def create_module_build(
         definitions=definitions,
         linked_builds=linked_builds,
         independent_tasks=independent_tasks,
+        component_refs=component_refs,
     )
 
 

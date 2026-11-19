@@ -1891,6 +1891,65 @@ def test_build_module_task_missing_component_branch():
         build_module_task(preview, ["perl:5.26"], "8.10")
 
 
+PHP_PREVIEW = dict(PERL_DBI_PREVIEW, module_name="php", module_stream="7.4", refs=[
+    dict(PERL_DBI_PREVIEW["refs"][0], url="https://git.almalinux.org/rpms/php.git",
+         git_ref="c8-stream-7.4", enabled=False, exist=False),
+    dict(PERL_DBI_PREVIEW["refs"][0], url="https://git.almalinux.org/rpms/php-pecl-apcu.git",
+         git_ref="c8-stream-7.4", enabled=False),
+])
+
+
+def test_build_module_task_component_refs_build_from_the_given_ref():
+    """php: no autopatch/php, so ALBS's preview gives c8-stream-7.4 (and would reuse it)."""
+    task = build_module_task(
+        PHP_PREVIEW, ["perl:5.26"], "8.10", component_refs={"php": "a8-stream-7.4"},
+    )
+    php, apcu = task["refs"]
+    assert (php["git_ref"], php["enabled"]) == ("a8-stream-7.4", True)
+    assert (apcu["git_ref"], apcu["enabled"]) == ("c8-stream-7.4", False)
+    assert PHP_PREVIEW["refs"][0]["git_ref"] == "c8-stream-7.4"  # preview not mutated
+
+
+def test_build_module_task_component_refs_unknown_component():
+    with pytest.raises(ValueError, match=r"Not a component of php:7.4: phpp\. Components: php, php-pecl-apcu"):
+        build_module_task(PHP_PREVIEW, ["perl:5.26"], "8.10", component_refs={"phpp": "a8"})
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_component_refs_checks_the_ref_in_git(client):
+    client._platforms_cache = {"AlmaLinux-8": AL8_PLATFORM["arch_list"]}
+    client.get_platforms = AsyncMock(return_value=[AL8_PLATFORM])
+    client._http.post = AsyncMock(side_effect=[
+        _mock_response(PHP_PREVIEW),
+        _mock_response({"id": 103600, "created_at": "2026-11-19T00:00:00"}),
+    ])
+    client._http.get = AsyncMock(return_value=_mock_response({}))
+    result, task = await client.create_module_build(
+        "https://git.almalinux.org/modules/php.git", "c8-stream-7.4", "AlmaLinux-8",
+        dependency_streams=["perl:5.26"], component_refs={"php": "a8-stream-7.4"},
+    )
+    assert result["id"] == 103600
+    assert client._http.get.call_args[0][0] == (
+        "https://git.almalinux.org/api/v1/repos/rpms/php/branches/a8-stream-7.4"
+    )
+    assert client._http.post.call_args_list[1][1]["json"]["tasks"][0]["refs"][0]["git_ref"] == "a8-stream-7.4"
+
+
+@pytest.mark.asyncio
+async def test_create_module_build_component_ref_missing_in_git_posts_nothing(client):
+    client._platforms_cache = {"AlmaLinux-8": AL8_PLATFORM["arch_list"]}
+    client.get_platforms = AsyncMock(return_value=[AL8_PLATFORM])
+    client._http.post = AsyncMock(return_value=_mock_response(PHP_PREVIEW))
+    client._http.get = AsyncMock(return_value=_mock_response({}, status_code=404))
+    with pytest.raises(ValueError, match="does not exist on git.almalinux.org: .*php.git a8-stream-7.9"):
+        await client.create_module_build(
+            "https://git.almalinux.org/modules/php.git", "c8-stream-7.4", "AlmaLinux-8",
+            dependency_streams=["perl:5.26"], component_refs={"php": "a8-stream-7.9"},
+        )
+    assert client._http.post.call_count == 1  # the preview only
+    assert [c[0][0].rsplit("/", 2)[-2] for c in client._http.get.call_args_list] == ["branches", "tags"]
+
+
 @pytest.mark.asyncio
 async def test_get_module_preview_posts_branch_ref(client):
     client._http.post = AsyncMock(return_value=_mock_response(PERL_DBI_PREVIEW))

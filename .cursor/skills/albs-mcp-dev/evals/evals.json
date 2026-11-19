@@ -771,6 +771,19 @@
         "The agent does not call create_build with use_build_configs=False without the user's consent"
       ],
       "files": []
+    },
+    {
+      "id": 60,
+      "name": "module_build_component_ref",
+      "category": "build",
+      "prompt": "Собери модуль php:7.4 для AlmaLinux-8 из ветки a8-stream-7.4 для php — превью ALBS берёт c8-stream-7.4.",
+      "expected_output": "The agent calls create_module_build(platform='AlmaLinux-8', module='php', branch='c8-stream-7.4', component_refs=['php=a8-stream-7.4']) — the module branch stays the modules/php branch, the component ref goes to component_refs — and checks the result's Components lines show php a8-stream-7.4 [build].",
+      "criteria": [
+        "create_module_build is called with component_refs=['php=a8-stream-7.4']",
+        "branch is the module repo branch (c8-stream-7.4), not the component ref",
+        "The agent checks the reported component refs match the requested branch"
+      ],
+      "files": []
     }
   ]
 }

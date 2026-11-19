@@ -1884,17 +1884,27 @@ async def _advisories_with_cves(
     return found
 
 
+def _module_stream(module: str | None) -> str | None:
+    """'name:stream' of a module ('' / None for none), version etc. dropped."""
+    if not module:
+        return None
+    return ":".join(module.split(":")[:2])
+
+
 def _same_package(record: dict, unit: str, module: str | None) -> bool:
     """Whether an existing advisory is for the same package / module stream.
 
-    By its module field for a module stream, else by its packages' source
-    RPM, with the title as a fallback — so kernel-rt is not kernel and
-    nodejs:22 is not nodejs:24.
+    The module stream must match first: a modular advisory (nginx:1.22)
+    does not cover the non-modular package (nginx), nor the other way
+    round, even though both list the same source RPM — and nodejs:22 is
+    not nodejs:24. Without a module, by the packages' source RPM, with the
+    title as a fallback — so kernel-rt is not kernel.
     """
+    if _module_stream(record.get("module")) != _module_stream(module):
+        return False
     if module:
-        if record.get("module"):
-            return record["module"] == module
-    elif any(
+        return True
+    if any(
         p.get("source_srpm") == unit for p in record.get("packages") or []
     ):
         return True

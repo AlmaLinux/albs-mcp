@@ -2630,6 +2630,81 @@ async def test_preview_errata_other_module_stream_is_not_duplicate(errata_client
 
 
 @pytest.mark.asyncio
+async def test_preview_errata_same_module_stream_is_duplicate(errata_client):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:87081", 1, "Important: nodejs:24 security update",
+        ["CVE-2026-19534"], source="nodejs", module="nodejs:24",
+    ))
+    result = await preview_errata(
+        [60005], cves=["CVE-2026-19534"], issued_date="2026-10-23"
+    )
+    assert (
+        '  !! DUPLICATE: ALSA-2026:87081 "Important: nodejs:24 security '
+        'update" already covers CVE-2026-19534 for nodejs:24 on AlmaLinux-8'
+        in result
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_base_package_vs_module_streams(errata_client):
+    # The nginx case: the non-modular package and its module streams carry
+    # the same CVEs and source RPM, yet none covers another.
+    errata_client.existing_advisories.extend([
+        _existing(f"ALSA-2026:A02{n}", 1,
+                  f"Critical: kernel:{s} security update", ["CVE-2026-31431"],
+                  module=f"kernel:{s}")
+        for n, s in ((1, "1.22"), (2, "1.24"), (3, "1.26"))
+    ])
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "DUPLICATE" not in result
+    for n in (1, 2, 3):
+        assert f"also in ALSA-2026:A02{n}" in result
+    # ... while a non-modular advisory of the package is still a duplicate.
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:A025", 1, "Critical: kernel security update",
+        ["CVE-2026-31431"],
+    ))
+    result = await preview_errata(
+        [60001], cves=["CVE-2026-31431"], issued_date="2026-10-23"
+    )
+    assert "!! DUPLICATE: 1 advisory(ies)" in result
+    assert "  !! DUPLICATE: ALSA-2026:A025 " in result
+    assert "DUPLICATE: ALSA-2026:A021" not in result
+
+
+@pytest.mark.asyncio
+async def test_preview_errata_module_vs_base_package_is_not_duplicate(
+    errata_client,
+):
+    errata_client.existing_advisories.append(_existing(
+        "ALSA-2026:87082", 1, "Important: nodejs security update",
+        ["CVE-2026-19534"], source="nodejs",
+    ))
+    result = await preview_errata(
+        [60005], cves=["CVE-2026-19534"], issued_date="2026-10-23"
+    )
+    assert "DUPLICATE" not in result
+    assert "also in ALSA-2026:87082" in result
+
+
+def test_same_package_module_stream():
+    same = commands_module._same_package
+    rec = lambda module, src="nginx": {  # noqa: E731
+        "module": module, "title": None,
+        "original_title": f"Critical: {module or src} security update",
+        "packages": [{"source_srpm": src}],
+    }
+    assert same(rec(""), "nginx", None)
+    assert not same(rec("nginx:1.22"), "nginx", None)
+    assert not same(rec(""), "nginx", "nginx:1.22")
+    assert not same(rec("nginx:1.24"), "nginx", "nginx:1.22")
+    assert same(rec("nginx:1.22"), "nginx", "nginx:1.22")
+    assert not same(rec("", src="nginx-mod"), "nginx", None)
+
+
+@pytest.mark.asyncio
 async def test_preview_errata_duplicate_ignores_cve_substring_and_platform(
     errata_client,
 ):

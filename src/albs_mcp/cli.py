@@ -205,7 +205,9 @@ def _cmd_preview_errata(args: argparse.Namespace) -> None:
 
 
 def _cmd_create_errata(args: argparse.Namespace) -> None:
-    _exec(cmd.create_errata(**_errata_kwargs(args), force=args.force))
+    _exec(cmd.create_errata(
+        **_errata_kwargs(args), force=args.force, wait_timeout=args.wait_timeout,
+    ))
 
 
 def _add_errata_args(p: argparse.ArgumentParser) -> None:
@@ -578,6 +580,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Create even when an existing advisory on the same platform already "
             "covers these CVEs for the same package (preview: !! DUPLICATE)."
+        ),
+    )
+    p.add_argument(
+        "--wait-timeout", type=float, default=None, metavar="SECONDS",
+        help=(
+            "How long to wait for ALBS to store each advisory before failing "
+            "(default: 180). ALBS stores advisories in the background; the "
+            "command reports success only once each one is listed."
         ),
     )
     p.set_defaults(func=_cmd_create_errata)

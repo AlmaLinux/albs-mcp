@@ -195,10 +195,13 @@ nodejs:24 module build → module "nodejs:24", title "nodejs:24 security update"
 4. ASK the user to confirm, then call create_errata with exactly the same \
 arguments (plus force=True only in the duplicate case above). Do not pick advisory IDs, dates or severity yourself — create_errata \
 renumbers from the latest ALBS ID right before creating.
-5. ALBS stores new advisories in the background: confirm with \
-get_errata(advisory_id) a few seconds later. If it is not found yet, wait and \
-check again — never call create_errata a second time for it, that would make \
-a duplicate advisory under the next ID. Creating an advisory does not release it.
+5. ALBS stores new advisories in the background; create_errata waits until \
+each one is stored and only then reports "Created". If it returns \
+"Error: ... not confirmed", check with get_errata(advisory_id) a bit later — \
+never call create_errata a second time for it, that would make a duplicate \
+advisory under the next ID. "Error: ID collision" means another advisory holds \
+the ID and ours was most likely dropped: tell the user. Creating an advisory \
+does not release it.
 6. To look at an existing advisory (e.g. an earlier ALSA-2026:A001 as an \
 example), call get_errata(advisory_id).
 
@@ -768,8 +771,12 @@ async def create_errata(
     confirmation. IDs are assigned here, right before creating, as the next
     free AlmaLinux numbers of the issue year (one counter for all
     platforms), in platform order. Fails without creating anything if an ID
-    is already taken. ALBS stores the advisories in the background — check
-    them with get_errata. Nothing is released. The result repeats every
+    is already taken. ALBS stores advisories in the background, so each one
+    is polled for until ALBS lists it under its ID (up to 3 minutes) before
+    the next is numbered — the call can take a while, and "Created" means
+    stored. An `Error: ... not confirmed` or `Error: ID collision` result
+    means that advisory may be missing: check it with get_errata and never
+    just retry with the same ID. Nothing is released. The result repeats every
     failed / cancelled build task (`! FAILED` lines) — report them to the user.
 
     Refuses, creating nothing, when an advisory would duplicate an existing

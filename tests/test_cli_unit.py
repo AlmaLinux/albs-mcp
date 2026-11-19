@@ -729,6 +729,20 @@ def test_create_errata_force():
         ])
     assert code == 0
     assert mock.call_args[1]["force"] is True
+    assert mock.call_args[1]["wait_timeout"] is None
+
+
+def test_create_errata_wait_timeout():
+    with patch(
+        "albs_mcp._commands.create_errata", new_callable=AsyncMock
+    ) as mock:
+        mock.return_value = "Created 1 advisory(ies) on ALBS"
+        code, _ = _invoke([
+            "create-errata", "94160", "--cve", "CVE-2026-109618",
+            "--wait-timeout", "600",
+        ])
+    assert code == 0
+    assert mock.call_args[1]["wait_timeout"] == 600.0
 
 
 def test_preview_errata_has_no_force():

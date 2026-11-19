@@ -6,6 +6,7 @@ Does NOT import mcp — only client.py and constants.py.
 from __future__ import annotations
 
 import ast
+import asyncio
 import datetime
 import json
 import os
@@ -32,8 +33,10 @@ from .constants import (
     ERRATA_DEBRAND_PATTERNS,
     ERRATA_DESCRIPTION_FOOTER,
     ERRATA_INTRO_SEARCH_PAGES,
+    ERRATA_POLL_INTERVAL,
     ERRATA_SEVERITIES,
     ERRATA_SKIP_RPM_MARKERS,
+    ERRATA_WAIT_TIMEOUT,
     KEY_LOG_TYPES,
     LOG_ERROR_PATTERN,
     LOG_LINES_PER_CHUNK,
@@ -1960,6 +1963,130 @@ def _next_errata_number(existing: Iterable[str], year: int) -> int:
     return max(numbers, default=0) + 1
 
 
+# Highest A-number per year this process has sent to ALBS. ALBS lists an
+# advisory only once its background worker has stored it, so the next
+# number is never taken from ALBS alone: an advisory that is still queued
+# (or timed out in create_errata) keeps its number reserved here.
+_issued_errata_numbers: dict[int, int] = {}
+_errata_lock_state: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+
+
+def _errata_lock() -> asyncio.Lock:
+    """One create_errata at a time, from numbering to confirmed storage.
+
+    Bound to the running event loop (a Lock may not be shared across loops).
+    """
+    global _errata_lock_state
+    loop = asyncio.get_running_loop()
+    if _errata_lock_state is None or _errata_lock_state[0] is not loop:
+        _errata_lock_state = (loop, asyncio.Lock())
+    return _errata_lock_state[1]
+
+
+def _reserve_errata_number(errata_id: str) -> None:
+    m = re.fullmatch(ALMA_ERRATA_ID_PATTERN, errata_id)
+    if m:
+        year, number = int(m.group(1)), int(m.group(2))
+        _issued_errata_numbers[year] = max(
+            _issued_errata_numbers.get(year, 0), number
+        )
+
+
+def _record_build_ids(record: dict) -> set[int]:
+    return {
+        a["build_id"]
+        for p in record.get("packages") or []
+        for a in p.get("albs_packages") or []
+        if a.get("build_id")
+    }
+
+
+def _nevra(p: dict) -> tuple:
+    return (
+        p.get("name"), str(p.get("epoch") or 0), p.get("version"),
+        p.get("release"), p.get("arch"),
+    )
+
+
+def _is_our_errata(record: dict, d: dict) -> bool:
+    """Is this ALBS record the advisory create_errata just sent for draft d?
+
+    Same platform, and the same builds (or, without build links, the same
+    RPMs, or else the same title).
+    """
+    p = d["payload"]
+    if record.get("platform_id") != p["platform_id"]:
+        return False
+    builds = _record_build_ids(record)
+    if builds:
+        return bool(builds & set(d["build_ids"]))
+    rpms = {_nevra(pkg) for pkg in record.get("packages") or []}
+    if rpms:
+        return bool(rpms & {_nevra(pkg) for pkg in p["packages"]})
+    return record.get("original_title") == (
+        f"{p['severity'].capitalize()}: {p['title']}"
+    )
+
+
+def _describe_errata_record(record: dict) -> str:
+    title = record.get("title") or record.get("original_title") or "untitled"
+    builds = _record_build_ids(record)
+    where = f"platform {record.get('platform_id')}"
+    if builds:
+        where += ", builds " + ", ".join(f"#{b}" for b in sorted(builds))
+    return f"{record.get('id')} ({where}): {title}"
+
+
+async def _wait_for_errata(
+    client: ALBSClient, d: dict, timeout: float, interval: float
+) -> str | None:
+    """Poll ALBS until the advisory of draft d is stored.
+
+    Returns None once it is, else the error text: another advisory holds
+    the ID (ALBS dropped ours), or it did not show up within `timeout`.
+    """
+    errata_id = d["payload"]["id"]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last_error = None
+    while True:
+        try:
+            data = await client.query_errata(errata_ids=[errata_id])
+            records = data.get("records") or []
+            last_error = None
+        except Exception as e:
+            records = []
+            last_error = _api_error(
+                f"getting advisory {errata_id}", e
+            ).removeprefix("Error: ")
+        foreign = [r for r in records if not _is_our_errata(r, d)]
+        if foreign:
+            return (
+                f"Error: ID collision — {errata_id} on ALBS is another advisory: "
+                + "; ".join(_describe_errata_record(r) for r in foreign)
+                + f". ALBS drops a second advisory with a taken ID without "
+                f"an error, so the advisory for {_draft_builds(d)} "
+                + ("was stored as well, under the same ID — fix it in ALBS"
+                   if len(foreign) < len(records) else
+                   "was most likely NOT stored. Run create_errata again to "
+                   "renumber")
+            )
+        if records:
+            return None
+        if loop.time() >= deadline:
+            return (
+                f"Error: {errata_id} not confirmed — ALBS accepted it but it "
+                f"did not show up within "
+                f"{timeout:g} s"
+                + (f" (last check: {last_error})" if last_error else "")
+                + ". ALBS stores advisories in a background queue that also "
+                "runs errata releases, so it may still be pending — or it "
+                f'was dropped. Check get_errata("{errata_id}") before creating '
+                "it again; this server will not hand out this number again"
+            )
+        await asyncio.sleep(max(0.0, min(interval, deadline - loop.time())))
+
+
 def _errata_url(errata_id: str, platform_id: int) -> str:
     return f"{ALBS_URL}/errata?id={errata_id}&platform_id={platform_id}"
 
@@ -2027,7 +2154,10 @@ async def _prepare_errata(
         raise _CommandError(
             _api_error("listing AlmaLinux advisory IDs", e)
         ) from e
-    number = _next_errata_number(existing, issued.year)
+    number = max(
+        _next_errata_number(existing, issued.year),
+        _issued_errata_numbers.get(issued.year, 0) + 1,
+    )
 
     references = _errata_references(sec["cves"])
     for offset, d in enumerate(drafts):
@@ -2260,18 +2390,52 @@ async def create_errata(
     title: str | None = None,
     description: str | None = None,
     force: bool = False,
+    wait_timeout: float | None = None,
+    poll_interval: float | None = None,
 ) -> str:
     """Create one AlmaLinux advisory per build and platform on ALBS.
 
     Refuses — creating nothing — when an advisory would duplicate an
     existing one (same platform, package and CVEs), unless `force`.
+
+    ALBS stores advisories in the background, so each one is sent and then
+    polled for (every `poll_interval` s, up to `wait_timeout` s) until ALBS
+    lists it as ours; only then is the next one numbered and sent. Calls
+    run one at a time, and the numbers sent are remembered, so two calls in
+    a row never get the same ID. Defaults: ERRATA_WAIT_TIMEOUT and
+    ERRATA_POLL_INTERVAL.
     """
+    if wait_timeout is None:
+        wait_timeout = ERRATA_WAIT_TIMEOUT
+    if poll_interval is None:
+        poll_interval = ERRATA_POLL_INTERVAL
     client = _get_client()
     if not client.jwt_token:
         return (
             "Auth error: creating errata requires a JWT token. "
             "Pass --token or set ALBS_JWT_TOKEN."
         )
+    async with _errata_lock():
+        return await _create_errata_locked(
+            client, builds, cves, rhsa, package, issued_date, updated_date,
+            title, description, force, wait_timeout, poll_interval,
+        )
+
+
+async def _create_errata_locked(
+    client: ALBSClient,
+    builds: list[int | str],
+    cves: list[str] | None,
+    rhsa: str | None,
+    package: str | None,
+    issued_date: str | None,
+    updated_date: str | None,
+    title: str | None,
+    description: str | None,
+    force: bool,
+    wait_timeout: float,
+    poll_interval: float,
+) -> str:
     try:
         sec, drafts = await _prepare_errata(
             client, builds, cves, rhsa, package, issued_date, updated_date,
@@ -2324,13 +2488,22 @@ async def create_errata(
     created: list[dict] = []
     for i, d in enumerate(drafts):
         errata_id = d["payload"]["id"]
+        # Reserved before sending: a request that fails on the way back may
+        # still have been queued, and a skipped number is harmless.
+        _reserve_errata_number(errata_id)
         try:
             result = await client.create_errata(d["payload"])
             error = None if result.get("ok") else (result.get("error") or str(result))
         except Exception as e:
             error = _api_error(f"creating {errata_id}", e).removeprefix("Error: ")
         if error:
-            lines = [f"Error: creating {errata_id} failed: {error}"]
+            error = f"Error: creating {errata_id} failed: {error}"
+        else:
+            # ALBS answered "ok" — that only means queued. Not a success
+            # until the advisory is listed under its ID as ours.
+            error = await _wait_for_errata(client, d, wait_timeout, poll_interval)
+        if error:
+            lines = [error]
             if created:
                 lines.append(
                     "Already created: " + ", ".join(summary(c) for c in created)
@@ -2350,8 +2523,8 @@ async def create_errata(
 
     first = drafts[0]["payload"]
     lines = [
-        f"Created {len(created)} advisory(ies) on ALBS — queued, ALBS stores "
-        "them in the background:",
+        f"Created {len(created)} advisory(ies) on ALBS — each one checked "
+        "stored under its ID:",
         *_broken_summary(created),
     ]
     for d in created:
@@ -2373,9 +2546,8 @@ async def create_errata(
         f"Issued: {first['issued_date']} | Updated: {first['updated_date']}"
     )
     lines.append(
-        f'Confirm with get_errata("{first["id"]}") once ALBS has processed '
-        "it. Nothing is released — releasing an advisory is a separate step "
-        "in ALBS."
+        f'View it with get_errata("{first["id"]}"). Nothing is released — '
+        "releasing an advisory is a separate step in ALBS."
     )
     return "\n".join(lines)
 

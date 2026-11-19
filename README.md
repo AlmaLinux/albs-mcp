@@ -228,7 +228,7 @@ Run `albs --help` or `albs <command> --help` for full usage.
 | `create_module_build` | Create a module build: module repo + branch (`c8-stream-1.641`) + platform + `dependency_streams` (`perl:5.26`); payload as the web UI sends it |
 | `sign_build` | Create a sign task for a build with a chosen key |
 | `create_release_plan` | Create a *scheduled* release plan for a build + platform + product. **Never performs the actual release** — only the plan |
-| `create_errata` | Create AlmaLinux advisories (`ALSA-YYYY:Annn`) from a package + CVEs (or an RHSA) + build(s); everything else is filled automatically, IDs assigned right before creating. Refuses duplicates of existing advisories unless `force=True`. Does not release them |
+| `create_errata` | Create AlmaLinux advisories (`ALSA-YYYY:Annn`) from a package + CVEs (or an RHSA) + build(s); everything else is filled automatically, IDs assigned right before creating; returns only once ALBS has stored each advisory. Refuses duplicates of existing advisories unless `force=True`. Does not release them |
 | `commit_release` | **Blocked** — performing the actual release is disabled; only plans are supported |
 | `delete_build` | **Blocked** — disabled for safety |
 
@@ -373,8 +373,8 @@ You give only the package (or module), the CVEs — or one RHSA — and the buil
      ! FAILED: build #54740 kernel aarch64 (task 411949) — rebuilt in build #54757; packages taken from there
    ```
    Without 54757 the same line ends with `— its packages are NOT in the advisory (add the retry build to include them)`.
-2. Asks you to confirm, then **`create_errata(...)`** with the same arguments — it re-reads the latest `ALSA-2026:A###` right before creating, so the IDs are always the next free ones
-3. **`get_errata("ALSA-2026:A011")`** — confirms ALBS stored it (ALBS creates advisories in the background)
+2. Asks you to confirm, then **`create_errata(...)`** with the same arguments — it re-reads the latest `ALSA-2026:A###` right before creating, so the IDs are always the next free ones. ALBS only queues an advisory (`POST /errata/new/` answers `ok` at once and a background worker stores it), and silently drops one whose ID is already taken on that platform — so `create_errata` waits until ALBS lists each advisory under its ID, with its builds, before it numbers the next one or reports `Created` (up to 3 minutes; `albs create-errata --wait-timeout SECONDS`). Calls run one at a time and the server remembers the numbers it handed out, so creating advisories one after another never reuses an ID. If an advisory does not show up in time, or another advisory turns up under its ID, the result is an `Error` (`not confirmed` / `ID collision`), not a success
+3. **`get_errata("ALSA-2026:A011")`** — shows the stored advisory
 
 How each field is filled:
 

@@ -116,10 +116,12 @@ SAMPLE_BUILD = {
 
 @pytest.fixture(autouse=True)
 def reset_client():
-    """Reset the global client before each test."""
+    """Reset the global client (and the errata numbers handed out) before each test."""
     commands_module._client = None
+    commands_module._issued_errata_numbers.clear()
     yield
     commands_module._client = None
+    commands_module._issued_errata_numbers.clear()
 
 
 @pytest.fixture
@@ -1779,6 +1781,16 @@ def errata_client(mock_client):
 
     async def query_errata(errata_id=None, errata_ids=None, platform_id=None,
                            page=1, title=None, cve_id=None):
+        if errata_ids:
+            # What ALBS has stored: every advisory posted so far (the
+            # background worker is instant here) plus `stored` extras.
+            found = [
+                r for r in [*map(_stored_record, _posted(mock_client)),
+                            *mock_client.stored_advisories]
+                if r["id"] in errata_ids
+                and platform_id in (None, r["platform_id"])
+            ]
+            return {"records": found, "total_records": len(found)}
         if cve_id:
             # Substring match, like the server's SQL LIKE.
             found = [
@@ -1801,6 +1813,7 @@ def errata_client(mock_client):
 
     mock_client.query_errata = AsyncMock(side_effect=query_errata)
     mock_client.existing_advisories = existing
+    mock_client.stored_advisories = []
     mock_client.create_errata = AsyncMock(return_value={"ok": True})
     mock_client.get_platform_ids = AsyncMock(return_value={
         "AlmaLinux-8": 1, "AlmaLinux-9": 9, "AlmaLinux-10": 50,
@@ -1810,6 +1823,24 @@ def errata_client(mock_client):
 
 def _posted(client) -> list[dict]:
     return [c.args[0] for c in client.create_errata.call_args_list]
+
+
+def _stored_record(payload: dict) -> dict:
+    """The /errata/query/ record ALBS makes from a POST /errata/new/ payload."""
+    return {
+        "id": payload["id"],
+        "platform_id": payload["platform_id"],
+        "title": None,
+        "original_title": f"{payload['severity']}: {payload['title']}",
+        "references": payload["references"],
+        "packages": [
+            {
+                **{k: v for k, v in pkg.items() if k != "build_id"},
+                "albs_packages": [{"build_id": pkg["build_id"]}],
+            }
+            for pkg in payload["packages"]
+        ],
+    }
 
 
 # ── preview_errata ────────────────────────────────────────────────────
@@ -2232,6 +2263,177 @@ async def test_create_errata_auth_error(errata_client):
     result = await create_errata([60001], issued_date="2026-10-23", cves=["CVE-2026-31431"])
     assert result.startswith("Error: creating ALSA-2026:A011 failed")
     assert "not authorized" in result
+
+
+def _delay_storage(client, polls: int) -> list[list[str]]:
+    """ALBS lists a posted advisory only after `polls` empty ID lookups.
+
+    Also keeps list_alma_errata_ids stale, as it is while the worker has not
+    stored the advisory yet. Returns the ID lookups made after each post.
+    """
+    query = client.query_errata.side_effect
+    post = client.create_errata.side_effect
+    lookups: list[list[str]] = []
+
+    async def create_errata(payload):
+        lookups.append([])
+        return {"ok": True}
+
+    async def query_errata(**kw):
+        if kw.get("errata_ids") and lookups:
+            lookups[-1].append(kw["errata_ids"])
+            if len(lookups[-1]) <= polls:
+                return {"records": [], "total_records": 0}
+        return await query(**kw)
+
+    assert post is None
+    client.create_errata = AsyncMock(side_effect=create_errata)
+    client.query_errata = AsyncMock(side_effect=query_errata)
+    return lookups
+
+
+@pytest.mark.asyncio
+async def test_create_errata_twice_in_a_row_gets_new_id(errata_client, monkeypatch):
+    # The 2026-11-18 race: nginx:1.14 and nginx:1.16 created one after the
+    # other both got ALSA-2026:A015 because ALBS had not stored the first
+    # yet, and ALBS dropped the second. Here ALBS stays stale (the advisory
+    # list never shows A011) and stores each advisory only after 2 polls.
+    monkeypatch.setattr(commands_module, "ERRATA_POLL_INTERVAL", 0.001)
+    lookups = _delay_storage(errata_client, polls=2)
+    first = await create_errata(  # the MCP tool, default timeouts
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+    )
+    second = await create_errata(
+        [60005], issued_date="2026-10-23", cves=["CVE-2026-19534"],
+    )
+    assert first.startswith("Created 1 advisory"), first
+    assert second.startswith("Created 1 advisory"), second
+    assert [p["id"] for p in _posted(errata_client)] == [
+        "ALSA-2026:A011", "ALSA-2026:A012",
+    ]
+    # Each create waited until ALBS listed its advisory (the 4th A011-round
+    # lookup is the second call's "is A012 taken?" check).
+    assert lookups == [
+        [["ALSA-2026:A011"]] * 3 + [["ALSA-2026:A012"]],
+        [["ALSA-2026:A012"]] * 3,
+    ]
+    # preview_errata numbers after what this process created, too.
+    preview = await preview_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"]
+    )
+    assert "ALSA-2026:A013  AlmaLinux-8" in preview
+
+
+@pytest.mark.asyncio
+async def test_create_errata_concurrent_calls_get_distinct_ids(errata_client):
+    import asyncio
+
+    _delay_storage(errata_client, polls=3)
+    results = await asyncio.gather(*(
+        commands_module.create_errata(
+            [build], issued_date="2026-10-23", cves=[cve], poll_interval=0.001,
+        )
+        for build, cve in [
+            (60001, "CVE-2026-31431"), (60005, "CVE-2026-19534"),
+        ]
+    ))
+    assert all(r.startswith("Created 1 advisory") for r in results), results
+    ids = [p["id"] for p in _posted(errata_client)]
+    assert sorted(ids) == ["ALSA-2026:A011", "ALSA-2026:A012"]
+
+
+@pytest.mark.asyncio
+async def test_create_errata_not_stored_in_time(errata_client):
+    query = errata_client.query_errata.side_effect
+
+    async def query_errata(**kw):
+        if kw.get("errata_ids") and errata_client.create_errata.await_count:
+            return {"records": [], "total_records": 0}  # never stored
+        return await query(**kw)
+
+    errata_client.query_errata = AsyncMock(side_effect=query_errata)
+    result = await commands_module.create_errata(
+        [60001, 60004], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+        wait_timeout=0.05, poll_interval=0.01,
+    )
+    assert result.startswith(
+        "Error: ALSA-2026:A011 not confirmed — ALBS accepted it but it did "
+        "not show up within 0.05 s"
+    ), result
+    assert 'get_errata("ALSA-2026:A011")' in result
+    assert "Created" not in result
+    assert "Not attempted: ALSA-2026:A012 (AlmaLinux-9, build #60004)" in result
+    assert errata_client.create_errata.await_count == 1
+    # The unconfirmed number stays reserved: the next create skips it even
+    # though ALBS still does not list it.
+    errata_client.query_errata = AsyncMock(side_effect=query)
+    again = await create_errata(
+        [60005], issued_date="2026-10-23", cves=["CVE-2026-19534"],
+    )
+    assert again.startswith("Created 1 advisory"), again
+    assert _posted(errata_client)[-1]["id"] == "ALSA-2026:A012"
+
+
+@pytest.mark.asyncio
+async def test_create_errata_id_collision_after_post(errata_client):
+    # Another advisory (created elsewhere, e.g. the web UI) took A011 while
+    # ours was queued: ALBS lists theirs and silently drops ours.
+    foreign = {
+        "id": "ALSA-2026:A011", "platform_id": 1, "title": None,
+        "original_title": "Moderate: nginx:1.14 security update",
+        "references": [],
+        "packages": [{"name": "nginx", "epoch": 1, "version": "1.14.1",
+                      "release": "9.module_el8", "arch": "x86_64",
+                      "albs_packages": [{"build_id": 102975}]}],
+    }
+    query = errata_client.query_errata.side_effect
+
+    async def query_errata(**kw):
+        if kw.get("errata_ids"):
+            posted = errata_client.create_errata.await_count
+            return {"records": [foreign] if posted else [],
+                    "total_records": 1 if posted else 0}
+        return await query(**kw)
+
+    errata_client.query_errata = AsyncMock(side_effect=query_errata)
+    result = await commands_module.create_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+        poll_interval=0.001,
+    )
+    assert result.startswith(
+        "Error: ID collision — ALSA-2026:A011 on ALBS is another advisory: "
+        "ALSA-2026:A011 (platform 1, builds #102975): Moderate: nginx:1.14 "
+        "security update"
+    ), result
+    assert "build #60001 was most likely NOT stored" in result
+    assert "Created" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_errata_record_without_build_links_is_ours(errata_client):
+    # ALBS could not link the RPMs to builds: the RPM list identifies it.
+    async def create(payload):
+        record = _stored_record(payload)
+        for pkg in record["packages"]:
+            pkg["albs_packages"] = []
+        errata_client.stored_advisories.append(record)
+        return {"ok": True}
+
+    query = errata_client.query_errata.side_effect
+
+    async def query_errata(**kw):
+        if kw.get("errata_ids"):
+            found = [r for r in errata_client.stored_advisories
+                     if r["id"] in kw["errata_ids"]]
+            return {"records": found, "total_records": len(found)}
+        return await query(**kw)
+
+    errata_client.create_errata = AsyncMock(side_effect=create)
+    errata_client.query_errata = AsyncMock(side_effect=query_errata)
+    result = await create_errata(
+        [60001], issued_date="2026-10-23", cves=["CVE-2026-31431"],
+    )
+    assert result.startswith("Created 1 advisory"), result
 
 
 # ── get_errata ────────────────────────────────────────────────────────

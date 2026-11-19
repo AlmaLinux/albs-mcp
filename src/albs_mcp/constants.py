@@ -218,6 +218,16 @@ RH_ADVISORY_ID_PATTERN = r"RH[SBE]A-(\d{4}):(\d+)"
 # next ID is the highest A-number of the year + 1, whatever the platform.
 ALMA_ERRATA_ID_PATTERN = r"AL[BES]A-(\d{4}):A(\d{3,4})"
 
+# POST /errata/new/ only queues the advisory for the single "errata" dramatiq
+# worker (which also runs errata releases) and answers {"ok": true} at once;
+# the server takes the ID from the payload. A second advisory sent with an
+# ID that is not stored yet passes every check and is then dropped by the
+# worker (primary key id + platform_id) without any error. So create_errata
+# waits until each advisory shows up in /errata/query/ before it reports
+# success or numbers the next one.
+ERRATA_WAIT_TIMEOUT = 180.0  # seconds
+ERRATA_POLL_INTERVAL = 2.0  # seconds
+
 # CVE / RHSA input always makes a security advisory.
 ALMA_ERRATA_PREFIX = "ALSA"
 

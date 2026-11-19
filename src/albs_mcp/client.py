@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 from collections import deque
@@ -12,6 +13,7 @@ from .constants import (
     ALBS_API,
     ALBS_LOGS_BASE,
     BETA_PLATFORM_FLAVORS,
+    BUILD_CONFIGS_URL,
     BUILD_TASK_COMPLETED,
     CVE_ID_PATTERN,
     LOG_CLIP_LEAD_CHARS,
@@ -108,6 +110,53 @@ def default_arches(platform: str, arch_list: list[str]) -> list[str]:
     """Arches a build of *platform* gets when the caller passes no arch_list."""
     skip = opt_in_arches(platform, arch_list)
     return [a for a in arch_list if a not in skip]
+
+
+def tag_branch(tag: str) -> str | None:
+    """The dist-git branch an ``imports/`` or ``changed/`` tag was cut from.
+
+    ``changed/a10-beta/openssh-9.9p1-20.el10_2.alma.1`` → ``a10-beta``; None
+    for any other ref.
+    """
+    parts = tag.split("/", 2)
+    if len(parts) == 3 and parts[0] in ("imports", "changed") and parts[1]:
+        return parts[1]
+    return None
+
+
+def srpm_package_name(url: str) -> str:
+    """Source package name of an SRPM URL or file name.
+
+    ``.../gcc-toolset-14-gcc-14.2.1-1.el10.src.rpm`` → ``gcc-toolset-14-gcc``.
+    """
+    name = url.rstrip("/").rsplit("/", 1)[-1]
+    name = name.removesuffix(".src.rpm").removesuffix(".nosrc.rpm")
+    parts = name.rsplit("-", 2)
+    return parts[0] if len(parts) == 3 else name
+
+
+def _pattern_specificity(pattern: str) -> tuple[int, int]:
+    """Sort key: more literal (non-wildcard) characters first, then longer."""
+    literal = sum(1 for c in pattern if c not in "*?[]")
+    return (-literal, -len(pattern))
+
+
+def match_build_config(
+    configs: dict[str, Any], package: str, branch: str
+) -> tuple[str, dict[str, Any]] | None:
+    """``(pattern, overrides)`` of *package* for *branch* in build_configs.json.
+
+    The most specific fnmatch pattern matching *branch* wins (``*portable*``
+    beats ``*``), the same rule releng-monitoring uses. None when the package
+    has no entry or no pattern matches.
+    """
+    entry = configs.get(package)
+    if not isinstance(entry, dict):
+        return None
+    for pattern in sorted(entry, key=_pattern_specificity):
+        if fnmatch.fnmatchcase(branch, pattern):
+            return pattern, entry[pattern]
+    return None
 
 
 def get_completed_task_ids(build_info: dict[str, Any]) -> list[int]:
@@ -330,6 +379,19 @@ class ALBSClient:
             products = await self.get_products()
             self._products_cache = {p["name"]: p["id"] for p in products}
         return self._products_cache
+
+    async def get_build_configs(self) -> dict[str, Any]:
+        """build_configs.json — per-package build overrides (no auth).
+
+        Fetched on every call (it is ~20 KB) so a build never uses stale
+        overrides.
+        """
+        r = await self._http.get(BUILD_CONFIGS_URL)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise ValueError("build_configs.json is not a JSON object")
+        return data
 
     async def get_build(self, build_id: int) -> dict[str, Any]:
         r = await self._http.get(f"{ALBS_API}/builds/{build_id}/")
@@ -734,7 +796,13 @@ class ALBSClient:
         modules: list[str] | None = None,
         add_epel_dist: bool = False,
         independent_tasks: bool = False,
+        task_mock_options: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """Create a build of *packages* (``{name_or_url: ref}`` each). Requires JWT.
+
+        *task_mock_options* are per-task mock_options, by the package's key
+        (build_configs overrides); ALBS applies them on top of the build's.
+        """
         if not from_tag and not branch and not from_srpm:
             raise ValueError("At least one of branch, from_tag, or from_srpm must be set")
         if from_tag and branch:
@@ -767,12 +835,18 @@ class ALBSClient:
                 }
                 if ref_type != 3:
                     task["git_ref"] = pkg_tag if from_tag else branch
+                opts = {
+                    k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in (task_mock_options or {}).get(pkg_name, {}).items()
+                }
                 if add_epel_dist and (from_tag or from_srpm):
                     dist = extract_el_version(pkg_name)
                     if dist:
-                        task["mock_options"] = {
-                            "definitions": {"dist": f"{dist}.alma_altarch"}
-                        }
+                        opts.setdefault("definitions", {})["dist"] = (
+                            f"{dist}.alma_altarch"
+                        )
+                if opts:
+                    task["mock_options"] = opts
                 tasks.append(task)
 
         data: dict[str, Any] = {

@@ -20,16 +20,24 @@ from .client import (
     ALBSClient,
     get_completed_task_ids,
     get_whole_package_task_ids,
+    match_build_config,
     opt_in_arches,
+    srpm_package_name,
+    tag_branch,
 )
 from .constants import (
     ALBS_URL,
     ALMA_ERRATA_ID_PATTERN,
     ALMA_ERRATA_PREFIX,
+    BUILD_CONFIGS_REPO,
+    BUILD_CONFIGS_URL,
     BUILD_TASK_COMPLETED,
     BUILD_TASK_STATUS,
     BUILD_TASK_STATUS_BY_NAME,
     CVE_ID_PATTERN,
+    EPEL_BUILD_CONFIGS_BRANCH,
+    EPEL_PLATFORM_FLAVORS,
+    EPEL_URL_PATTERN,
     ERRATA_DEBRAND_PATTERNS,
     ERRATA_DESCRIPTION_FOOTER,
     ERRATA_INTRO_SEARCH_PAGES,
@@ -724,6 +732,7 @@ async def create_build(
     without_opts: list[str] | None = None,
     modules: list[str] | None = None,
     independent_tasks: bool = False,
+    use_build_configs: bool = True,
 ) -> str:
     all_platforms: list[str] = []
     if platform:
@@ -808,6 +817,29 @@ async def create_build(
         )
 
     client = _get_client()
+    groups: list[dict] = [{
+        "packages": pkg_dicts,
+        "flavors": flavors,
+        "secureboot": secureboot,
+        "linked_builds": linked_builds,
+        "task_mock_options": None,
+    }]
+    if use_build_configs:
+        try:
+            configs = await client.get_build_configs()
+        except Exception as e:
+            return _build_configs_error(e)
+        try:
+            groups = _apply_build_configs(
+                configs, pkg_dicts, all_platforms, notes,
+                branch=branch, from_tag=from_tag, from_srpm=from_srpm,
+                flavors=flavors, secureboot=secureboot,
+                nosecureboot=nosecureboot, linked_builds=linked_builds,
+                definitions=defs,
+            )
+        except ValueError as e:
+            return f"Error: {e}"
+
     try:
         if not arch_list:
             # Same cached fetch create_build validates against — no extra call.
@@ -820,40 +852,259 @@ async def create_build(
                         f"{plat}: not built by default (opt-in): "
                         f"{', '.join(skipped)} — request it explicitly (arch_list / --arch)"
                     )
-        result = await client.create_build(
-            packages=pkg_dicts,
-            platforms=all_platforms,
-            arch_list=arch_list,
-            branch=branch,
-            from_tag=from_tag,
-            from_srpm=from_srpm,
-            beta=beta,
-            secureboot=secureboot,
-            nosecureboot=nosecureboot,
-            excludes=excl,
-            definitions=defs,
-            linked_builds=linked_builds,
-            additional_flavors=flavors,
-            with_opts=with_opts,
-            without_opts=without_opts,
-            modules=modules,
-            add_epel_dist=add_epel_dist,
-            independent_tasks=independent_tasks,
-        )
+    except Exception as e:
+        return _api_error("creating build", e)
+
+    created: list[tuple[dict, dict]] = []
+    for group in groups:
+        try:
+            result = await client.create_build(
+                packages=group["packages"],
+                platforms=all_platforms,
+                arch_list=arch_list,
+                branch=branch,
+                from_tag=from_tag,
+                from_srpm=from_srpm,
+                beta=beta,
+                secureboot=group["secureboot"],
+                nosecureboot=nosecureboot,
+                excludes=excl,
+                definitions=defs,
+                linked_builds=group["linked_builds"],
+                additional_flavors=group["flavors"],
+                with_opts=with_opts,
+                without_opts=without_opts,
+                modules=modules,
+                add_epel_dist=add_epel_dist,
+                independent_tasks=independent_tasks,
+                task_mock_options=group["task_mock_options"],
+            )
+        except Exception as e:
+            error = _api_error("creating build", e)
+            if not created:
+                return error
+            names = ", ".join(_group_names(group))
+            return "\n".join([
+                f"{error}",
+                f"The build of {names} was NOT created, but "
+                f"{len(created)} other build(s) of this request were:",
+                *_created_lines(created),
+            ])
+        created.append((group, result))
+
+    if len(created) == 1:
+        result = created[0][1]
         lines = [
             "Build created successfully!",
             f"Build ID: {result['id']}",
             f"Created at: {result['created_at']}",
             f"URL: https://build.almalinux.org/build/{result['id']}",
         ]
-        if notes:
-            lines.append("")
-            lines.append("Applied settings:")
-            for note in notes:
-                lines.append(f"  • {note}")
-        return "\n".join(lines)
-    except Exception as e:
-        return _api_error("creating build", e)
+    else:
+        lines = [
+            f"{len(created)} builds created successfully — build_configs give "
+            f"these packages different build-level settings (flavors / "
+            f"Secure Boot), so they cannot share one build:",
+            *_created_lines(created),
+        ]
+    if notes:
+        lines.append("")
+        lines.append("Applied settings:")
+        for note in notes:
+            lines.append(f"  • {note}")
+    return "\n".join(lines)
+
+
+def _group_names(group: dict) -> list[str]:
+    return [next(iter(p)) for p in group["packages"]]
+
+
+def _created_lines(created: list[tuple[dict, dict]]) -> list[str]:
+    lines: list[str] = []
+    for group, result in created:
+        lines.append(
+            f"Build ID: {result['id']} — {', '.join(_group_names(group))}"
+        )
+        lines.append(f"  URL: https://build.almalinux.org/build/{result['id']}")
+    return lines
+
+
+def _build_configs_error(e: Exception) -> str:
+    if isinstance(e, httpx.HTTPStatusError):
+        reason = f"HTTP {e.response.status_code}"
+    elif isinstance(e, httpx.RequestError):
+        reason = "network error"
+    else:
+        reason = str(e) or type(e).__name__
+    return (
+        f"Error: could not read build_configs.json ({BUILD_CONFIGS_REPO}): "
+        f"{reason}. No build was created. Retry, or — only if the user "
+        f"agrees to build without the per-package overrides — pass "
+        f"use_build_configs=False (--no-build-configs)."
+    )
+
+
+def _config_package_name(key: str, from_srpm: bool) -> str:
+    """Source package name a build_configs entry is keyed by."""
+    if from_srpm:
+        return srpm_package_name(key)
+    if key.startswith(("http://", "https://")):
+        return key.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return key
+
+
+def _config_branch(
+    key: str,
+    ref: str,
+    platform: str,
+    *,
+    branch: str | None,
+    from_tag: bool,
+    from_srpm: bool,
+    flavors: list[str] | None,
+) -> str | None:
+    """Branch a package is matched with in build_configs; None if unknown.
+
+    A branch build uses its branch; a tag build the branch of an
+    ``imports/``/``changed/`` tag; an EPEL SRPM build the platform's EPEL
+    branch (``almalinux-epel-10``). Any other SRPM or tag has none.
+    """
+    if from_srpm:
+        epel_flavors = EPEL_PLATFORM_FLAVORS.get(platform, [])
+        is_epel = EPEL_URL_PATTERN in key or any(
+            f in epel_flavors for f in flavors or []
+        )
+        return EPEL_BUILD_CONFIGS_BRANCH.get(platform) if is_epel else None
+    if from_tag:
+        return tag_branch(ref)
+    return branch
+
+
+def _apply_build_configs(
+    configs: dict,
+    pkg_dicts: list[dict[str, str]],
+    platforms: list[str],
+    notes: list[str],
+    *,
+    branch: str | None,
+    from_tag: bool,
+    from_srpm: bool,
+    flavors: list[str] | None,
+    secureboot: bool,
+    nosecureboot: bool,
+    linked_builds: list[int] | None,
+    definitions: dict | None,
+) -> list[dict]:
+    """Split *pkg_dicts* into builds with their build_configs overrides applied.
+
+    Packages whose overrides need other build-level settings (extra flavors,
+    Secure Boot) go into builds of their own; every build gets the caller's
+    flavors and linked builds plus its packages' ones, and each package its
+    mock_options as per-task options. What the caller set explicitly wins:
+    nosecureboot drops a config's secure_boot, a definition the caller passed
+    is not overridden. Appends what was applied to *notes*.
+    """
+    groups: dict[tuple, dict] = {}
+    for pkg in pkg_dicts:
+        key, ref = next(iter(pkg.items()))
+        name = _config_package_name(key, from_srpm)
+        cfg = None
+        if name in configs:
+            matches: dict[str, tuple[str, tuple[str, dict] | None]] = {}
+            for plat in platforms:
+                br = _config_branch(
+                    key, ref, plat, branch=branch, from_tag=from_tag,
+                    from_srpm=from_srpm, flavors=flavors,
+                )
+                if br is not None:
+                    matches[plat] = (br, match_build_config(configs, name, br))
+            if not matches:
+                notes.append(
+                    f"build_configs: {name} has overrides for branches "
+                    f"{', '.join(configs[name])}, but this build has no git "
+                    f"branch to match them (SRPM outside EPEL, or a tag other "
+                    f"than imports/<branch>/… or changed/<branch>/…) — NOT "
+                    f"applied; pass them explicitly if they are needed"
+                )
+            else:
+                distinct = {
+                    json.dumps(m[1] if m else None, sort_keys=True)
+                    for _, m in matches.values()
+                }
+                if len(distinct) > 1:
+                    per_plat = ", ".join(
+                        f"{plat}: {br} → {m[0] if m else 'no match'}"
+                        for plat, (br, m) in matches.items()
+                    )
+                    raise ValueError(
+                        f"build_configs give {name} different overrides per "
+                        f"platform ({per_plat}). Create one build per platform."
+                    )
+                br, cfg_match = next(iter(matches.values()))
+                if cfg_match:
+                    cfg = (br, *cfg_match)
+
+        entry = cfg[2] if cfg else {}
+        cfg_flavors = list(entry.get("platform_flavors") or [])
+        cfg_sb = bool(entry.get("secure_boot"))
+        sb = secureboot or (cfg_sb and not nosecureboot)
+        group = groups.setdefault((tuple(cfg_flavors), sb), {
+            "packages": [],
+            "flavors": list(dict.fromkeys([*(flavors or []), *cfg_flavors]))
+            or None,
+            "secureboot": sb,
+            "linked_builds": list(linked_builds or []),
+            "task_mock_options": {},
+        })
+        group["packages"].append(pkg)
+        if not cfg:
+            continue
+
+        for build_id in entry.get("linked_builds") or []:
+            if build_id not in group["linked_builds"]:
+                group["linked_builds"].append(build_id)
+        opts = {
+            k: (dict(v) if isinstance(v, dict) else v)
+            for k, v in (entry.get("mock_options") or {}).items()
+            if v not in (None, "", [], {})
+        }
+        kept = sorted(set(opts.get("definitions", {})) & set(definitions or {}))
+        for k in kept:
+            del opts["definitions"][k]
+        if "definitions" in opts and not opts["definitions"]:
+            del opts["definitions"]
+        if opts:
+            group["task_mock_options"][key] = opts
+
+        br, pattern = cfg[0], cfg[1]
+        applied: list[str] = []
+        if cfg_flavors:
+            applied.append(f"flavors {', '.join(cfg_flavors)}")
+        if cfg_sb:
+            applied.append(
+                "secure_boot IGNORED (nosecureboot)"
+                if nosecureboot and not secureboot else "secure_boot"
+            )
+        if entry.get("linked_builds"):
+            applied.append(
+                f"linked builds {', '.join(map(str, entry['linked_builds']))}"
+            )
+        if opts:
+            applied.append(f"mock_options {_format_mock_options(opts)}")
+        if kept:
+            applied.append(
+                f"your definitions kept for {', '.join(kept)} "
+                f"(build_configs value not used)"
+            )
+        notes.append(
+            f"build_configs: {name} (branch {br}, pattern '{pattern}'): "
+            f"{'; '.join(applied) or 'empty override'}"
+        )
+
+    for group in groups.values():
+        group["linked_builds"] = group["linked_builds"] or None
+        group["task_mock_options"] = group["task_mock_options"] or None
+    return list(groups.values())
 
 
 async def create_module_build(

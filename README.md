@@ -29,7 +29,7 @@ Two ways to use:
 
 ### With a JWT token (authenticated)
 
-- **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list, minus opt-in arches (riscv64 on AlmaLinux-10 is built only when you ask for it), unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without.
+- **Create builds** — specify packages, platform(s), branch/tag/SRPM. Supports multiple platforms in a single build (e.g. AlmaLinux-8 + AlmaLinux-9). Architectures default to each platform's full list, minus opt-in arches (riscv64 on AlmaLinux-10 is built only when you ask for it), unless you override. Supports custom Git URLs for repos outside `git.almalinux.org` (e.g. GitHub, GitLab). Supports all mkbuild.py options: linked builds, mock definitions, excludes, flavors, secureboot, modules, with/without. Per-package overrides from [build_configs](https://git.almalinux.org/almalinux/build_configs) (extra flavors, Secure Boot, linked builds, per-task mock options) are checked and applied automatically.
 - **Create module builds** — build a modular stream (e.g. `perl-DBI:1.641` on AlmaLinux-8) exactly like the web UI: ALBS's module preview reads `modules.yaml` of the module branch, every component is built, and ALBS computes module version, context and the `.module_el8…` dist. Dependencies the template leaves without a stream (`perl: []`) must be given one (`dependency_streams=["perl:5.26"]`, one build per stream) — the tool refuses otherwise instead of producing a build that fails with `missing groups or modules: perl:`.
 - **Sign builds** — create sign tasks with a chosen key.
 - **List sign keys** — see available keys with IDs and platform mappings.
@@ -161,6 +161,9 @@ albs create-module-build AlmaLinux-8 perl-DBI c8-stream-1.641 --stream perl:5.26
 # Independent tasks (disable the default sequential per-platform task chain,
 # so packages build in parallel within each platform)
 albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
+
+# Build without the build_configs overrides (applied by default)
+albs create-build AlmaLinux-9 kernel --branch a9 --secureboot --no-build-configs
 
 # Sign a build (requires JWT)
 albs sign-keys
@@ -307,6 +310,18 @@ create_build(git_urls=["https://github.com/ykohut/leapp-data.git"], platform="Al
 
 Architectures default to each platform's full list, except opt-in arches: **riscv64 on AlmaLinux-10 is not built by default**. It stays a valid arch — to build it, pass the arches explicitly, e.g. `arch_list=["i686", "x86_64", "x86_64_v2", "aarch64", "ppc64le", "s390x", "riscv64"]` (CLI: repeat `--arch`). `get_platforms` marks opt-in arches, and the `create_build` result notes which ones were left out. The opt-in list lives in `OPT_IN_ARCHES` in `constants.py`. When `arch_list` is specified with multiple platforms, it is validated against each platform individually.
 
+### Per-package build configs
+
+Before creating a build, `create_build` reads `build_configs.json` from [git.almalinux.org/almalinux/build_configs](https://git.almalinux.org/almalinux/build_configs) — the same per-package overrides releng-monitoring applies to its builds — and applies the entry of every package:
+
+- the branch it is matched with is the build's `branch`, the branch of an `imports/<branch>/…` / `changed/<branch>/…` tag, or `almalinux-epel-10` / `kitten-epel-10` for EPEL SRPMs (the most specific fnmatch pattern wins);
+- `platform_flavors` are added to the build's flavors, `secure_boot` turns Secure Boot on, `linked_builds` are added to the linked builds, and `mock_options` (definitions, module_enable, yum_exclude, with/without, target_arch) go to the package's task;
+- packages needing different flavors or Secure Boot are split into separate builds, so one call may return several build IDs;
+- what you pass explicitly wins: `nosecureboot` drops a config's Secure Boot, and a `definitions` key you pass is not overridden;
+- `use_build_configs=False` (CLI: `--no-build-configs`) turns it off. If the file cannot be fetched, no build is created.
+
+The result lists every applied override (`build_configs: kernel (branch a9, pattern 'a*'): secure_boot`) and every entry that could not be matched (an SRPM outside EPEL, a tag that is not `imports/`/`changed/`). Module builds (`create_module_build`) do not use build_configs.
+
 ## Example: creating module builds
 
 Ask the agent: *"Rebuild perl-DBI:1.641 for AlmaLinux-8 for every perl stream, like the previous builds"*
@@ -406,10 +421,10 @@ The preview adds a `NOTE` when Red Hat does not tie one of the given CVEs to the
 ```bash
 pip install -e ".[test]"
 
-# Unit tests (no network, 389 tests)
+# Unit tests (no network, 429 tests)
 pytest tests/test_client_unit.py tests/test_server_unit.py tests/test_cli_unit.py -v
 
-# Integration tests (hits real ALBS API, read-only, 38 tests)
+# Integration tests (hits real ALBS API, read-only, 41 tests)
 pytest tests/test_integration.py -v
 
 # All tests

@@ -309,6 +309,24 @@ def test_create_build_branch():
     assert call_kw["branch"] == "c9s"
 
 
+def test_create_build_build_configs_on_by_default():
+    with patch("albs_mcp._commands.create_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Build created successfully!\nBuild ID: 99999"
+        _invoke(["create-build", "AlmaLinux-9", "kernel", "--branch", "a9"])
+    assert mock.call_args[1]["use_build_configs"] is True
+
+
+def test_create_build_no_build_configs():
+    with patch("albs_mcp._commands.create_build", new_callable=AsyncMock) as mock:
+        mock.return_value = "Build created successfully!\nBuild ID: 99999"
+        code, _ = _invoke([
+            "create-build", "AlmaLinux-9", "kernel", "--branch", "a9",
+            "--no-build-configs",
+        ])
+    assert code == 0
+    assert mock.call_args[1]["use_build_configs"] is False
+
+
 def test_create_build_from_srpm():
     srpm = "https://example.com/pkg-1.0-1.el10.src.rpm"
     with patch("albs_mcp._commands.create_build", new_callable=AsyncMock) as mock:

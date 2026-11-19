@@ -166,6 +166,7 @@ def mock_client():
         1, 936, 3,
     ))
     client.create_build = AsyncMock(return_value={"id": 99999, "created_at": "2026-03-10T00:00:00"})
+    client.get_build_configs = AsyncMock(return_value={})
     client.create_module_build = AsyncMock(return_value=(
         {"id": 100700, "created_at": "2026-11-12T00:00:00"},
         {
@@ -990,6 +991,244 @@ async def test_create_build_skip_tests_merges_definitions_dict(mock_client):
         "dist": ".el9",
         "__spec_check_template": "exit 0;",
     }
+
+
+# ── create_build: build_configs ──────────────────────────────────────
+
+BC = {
+    "kernel": {"a*": {"secure_boot": True}},
+    "nvidia-open-kmod": {"a*": {
+        "secure_boot": True,
+        "mock_options": {"definitions": {"modsign_os": "almalinux-nvidia-signing"}},
+    }},
+    "dotnet8.0": {"c*": {"platform_flavors": ["dotnet-build"]}},
+    "sssd": {
+        "c8": {"mock_options": {"module_enable": ["idm:DL1"]}},
+        "a8": {"mock_options": {"module_enable": ["idm:DL1"]}},
+    },
+    "maven": {"*": {"mock_options": {"target_arch": "noarch"}}},
+    "fmt": {"*epel*": {"mock_options": {"definitions": {"epel": "10"}}}},
+    "linked": {"*": {"linked_builds": [500]}},
+}
+
+
+@pytest.fixture
+def bc_client(mock_client):
+    mock_client.get_build_configs = AsyncMock(return_value=BC)
+    ids = iter(range(70001, 70100))
+    mock_client.create_build = AsyncMock(
+        side_effect=lambda **kw: {"id": next(ids), "created_at": "2026-11-19"}
+    )
+    return mock_client
+
+
+@pytest.mark.asyncio
+async def test_build_configs_secure_boot_from_branch(bc_client):
+    result = await create_build(packages=["kernel"], platform="AlmaLinux-9", branch="a9")
+    kw = bc_client.create_build.call_args[1]
+    assert kw["secureboot"] is True
+    assert kw["task_mock_options"] is None
+    assert "build_configs: kernel (branch a9, pattern 'a*'): secure_boot" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_no_match_for_branch(bc_client):
+    result = await create_build(packages=["kernel"], platform="AlmaLinux-9", branch="c9s")
+    kw = bc_client.create_build.call_args[1]
+    assert kw["secureboot"] is False
+    assert "build_configs" not in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_flavors_appended_to_user_flavors(bc_client):
+    await create_build(
+        packages=["dotnet8.0"], platform="AlmaLinux-9", branch="c9s",
+        flavors=["AlmaLinux-9-beta"],
+    )
+    kw = bc_client.create_build.call_args[1]
+    assert kw["additional_flavors"] == ["AlmaLinux-9-beta", "dotnet-build"]
+
+
+@pytest.mark.asyncio
+async def test_build_configs_task_mock_options_from_tag(bc_client):
+    result = await create_build(
+        packages=["sssd imports/c8/sssd-2.9.4-5.el8", "bash imports/c8/bash-4.4-1.el8"],
+        platform="AlmaLinux-8", from_tag=True,
+    )
+    kw = bc_client.create_build.call_args[1]
+    assert bc_client.create_build.await_count == 1
+    assert kw["task_mock_options"] == {"sssd": {"module_enable": ["idm:DL1"]}}
+    assert "mock_options module_enable: idm:DL1" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_unmatchable_tag_noted(bc_client):
+    result = await create_build(
+        packages=["sssd v2.9.4"], platform="AlmaLinux-8", from_tag=True,
+    )
+    assert bc_client.create_build.call_args[1]["task_mock_options"] is None
+    assert "sssd has overrides for branches c8, a8" in result
+    assert "NOT applied" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_split_by_build_level_settings(bc_client):
+    result = await create_build(
+        packages=["bash", "kernel", "maven"], platform="AlmaLinux-9", branch="a9",
+        linked_builds=[1],
+    )
+    assert bc_client.create_build.await_count == 2
+    first, second = (c[1] for c in bc_client.create_build.call_args_list)
+    assert first["packages"] == [{"bash": "None"}, {"maven": "None"}]
+    assert first["secureboot"] is False
+    assert first["task_mock_options"] == {"maven": {"target_arch": "noarch"}}
+    assert second["packages"] == [{"kernel": "None"}]
+    assert second["secureboot"] is True
+    assert first["linked_builds"] == second["linked_builds"] == [1]
+    assert result.startswith("2 builds created successfully")
+    assert "Build ID: 70001 — bash, maven" in result
+    assert "Build ID: 70002 — kernel" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_split_partial_failure(bc_client):
+    calls = []
+
+    async def create(**kw):
+        calls.append(kw)
+        if len(calls) == 2:
+            raise ValueError("boom")
+        return {"id": 70001, "created_at": "x"}
+
+    bc_client.create_build = AsyncMock(side_effect=create)
+    result = await create_build(
+        packages=["bash", "kernel"], platform="AlmaLinux-9", branch="a9",
+    )
+    assert result.startswith("Error")
+    assert "The build of kernel was NOT created" in result
+    assert "Build ID: 70001 — bash" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_user_secureboot_does_not_split(bc_client):
+    await create_build(
+        packages=["bash", "kernel"], platform="AlmaLinux-9", branch="a9",
+        secureboot=True,
+    )
+    assert bc_client.create_build.await_count == 1
+    assert bc_client.create_build.call_args[1]["secureboot"] is True
+
+
+@pytest.mark.asyncio
+async def test_build_configs_nosecureboot_wins(bc_client):
+    result = await create_build(
+        packages=["kernel"], platform="AlmaLinux-9", branch="a9", nosecureboot=True,
+    )
+    assert bc_client.create_build.call_args[1]["secureboot"] is False
+    assert "secure_boot IGNORED (nosecureboot)" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_user_definitions_win(bc_client):
+    result = await create_build(
+        packages=["nvidia-open-kmod"], platform="AlmaLinux-9", branch="a9",
+        definitions={"modsign_os": "mine"},
+    )
+    kw = bc_client.create_build.call_args[1]
+    assert kw["definitions"] == {"modsign_os": "mine"}
+    assert kw["task_mock_options"] is None
+    assert "your definitions kept for modsign_os" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_linked_builds_merged(bc_client):
+    await create_build(
+        packages=["linked"], platform="AlmaLinux-9", branch="a9", linked_builds=[1, 500],
+    )
+    assert bc_client.create_build.call_args[1]["linked_builds"] == [1, 500]
+    await create_build(packages=["linked"], platform="AlmaLinux-9", branch="a9")
+    assert bc_client.create_build.call_args[1]["linked_builds"] == [500]
+
+
+@pytest.mark.asyncio
+async def test_build_configs_epel_srpm_branch(bc_client):
+    url = "https://dl.fedoraproject.org/pub/epel/10/source/f/fmt-11.1.4-1.el10_1.src.rpm"
+    result = await create_build(packages=[url], platform="AlmaLinux-10", from_srpm=True)
+    kw = bc_client.create_build.call_args[1]
+    assert kw["task_mock_options"] == {url: {"definitions": {"epel": "10"}}}
+    assert "fmt (branch almalinux-epel-10, pattern '*epel*')" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_epel_detected_by_flavor(bc_client):
+    url = "https://mirror.example/fmt-11.1.4-1.el10_1.src.rpm"
+    await create_build(
+        packages=[url], platform="AlmaLinux-Kitten-10", from_srpm=True,
+        flavors=["EPEL-10", "EPEL-Kitten-10_altarch"],
+    )
+    kw = bc_client.create_build.call_args[1]
+    assert kw["task_mock_options"] == {url: {"definitions": {"epel": "10"}}}
+
+
+@pytest.mark.asyncio
+async def test_build_configs_non_epel_srpm_noted(bc_client):
+    url = "https://mirror.example/fmt-11.1.4-1.el10_1.src.rpm"
+    result = await create_build(packages=[url], platform="AlmaLinux-10", from_srpm=True)
+    assert bc_client.create_build.call_args[1]["task_mock_options"] is None
+    assert "fmt has overrides" in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_different_per_platform_refused(bc_client):
+    bc_client.get_build_configs = AsyncMock(return_value={
+        "fmt": {"almalinux-epel-10": {"mock_options": {"with": ["x"]}}},
+    })
+    url = "https://dl.fedoraproject.org/pub/epel/10/source/f/fmt-11.1.4-1.el10_1.src.rpm"
+    result = await create_build(
+        packages=[url], platforms=["AlmaLinux-10", "AlmaLinux-Kitten-10"], from_srpm=True,
+    )
+    assert result.startswith("Error")
+    assert "Create one build per platform" in result
+    bc_client.create_build.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_configs_git_url_name(bc_client):
+    await create_build(
+        git_urls=["https://github.com/x/maven.git"], platform="AlmaLinux-9", branch="main",
+    )
+    kw = bc_client.create_build.call_args[1]
+    assert kw["task_mock_options"] == {
+        "https://github.com/x/maven.git": {"target_arch": "noarch"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_configs_disabled(bc_client):
+    result = await create_build(
+        packages=["kernel"], platform="AlmaLinux-9", branch="a9",
+        secureboot=True, use_build_configs=False,
+    )
+    bc_client.get_build_configs.assert_not_awaited()
+    assert "build_configs" not in result
+
+
+@pytest.mark.asyncio
+async def test_build_configs_fetch_error_creates_nothing(bc_client):
+    bc_client.get_build_configs = AsyncMock(side_effect=_http_status_error(503))
+    result = await create_build(packages=["bash"], platform="AlmaLinux-9", branch="a9")
+    assert result.startswith("Error: could not read build_configs.json")
+    assert "HTTP 503" in result
+    assert "use_build_configs=False" in result
+    bc_client.create_build.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_configs_network_error(bc_client):
+    bc_client.get_build_configs = AsyncMock(side_effect=httpx.ConnectError("down"))
+    result = await create_build(packages=["bash"], platform="AlmaLinux-9", branch="a9")
+    assert "network error" in result
+    bc_client.create_build.assert_not_awaited()
 
 
 # ── create_build: EPEL params (AI passes explicitly) ─────────────────

@@ -15,9 +15,12 @@ from albs_mcp.client import (
     extract_el_version,
     get_completed_task_ids,
     get_whole_package_task_ids,
+    match_build_config,
     opt_in_arches,
+    srpm_package_name,
+    tag_branch,
 )
-from albs_mcp.constants import ALBS_API
+from albs_mcp.constants import ALBS_API, BUILD_CONFIGS_URL
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -862,6 +865,108 @@ async def test_create_build_linked_builds(client):
     )
     call_data = client._http.post.call_args[1]["json"]
     assert call_data["linked_builds"] == [100, 200]
+
+
+@pytest.mark.asyncio
+async def test_create_build_task_mock_options(client):
+    client._platforms_cache = {"AlmaLinux-8": ["x86_64"]}
+    client._http.post = AsyncMock(return_value=_mock_response({"id": 1, "created_at": "x"}))
+    opts = {"sssd": {"module_enable": ["idm:DL1"], "definitions": {"a": "1"}}}
+    await client.create_build(
+        packages=[{"sssd": "None"}, {"bash": "None"}],
+        platforms=["AlmaLinux-8"],
+        branch="a8",
+        task_mock_options=opts,
+    )
+    tasks = client._http.post.call_args[1]["json"]["tasks"]
+    assert tasks[0]["mock_options"] == {
+        "module_enable": ["idm:DL1"], "definitions": {"a": "1"},
+    }
+    assert "mock_options" not in tasks[1]
+    # the caller's dict is not mutated
+    assert opts == {"sssd": {"module_enable": ["idm:DL1"], "definitions": {"a": "1"}}}
+
+
+@pytest.mark.asyncio
+async def test_create_build_task_mock_options_with_epel_dist(client):
+    client._platforms_cache = {"AlmaLinux-10": ["x86_64_v2"]}
+    client._http.post = AsyncMock(return_value=_mock_response({"id": 1, "created_at": "x"}))
+    url = "https://dl.fedoraproject.org/p/maven-3.9-1.el10_1.src.rpm"
+    opts = {url: {"target_arch": "noarch", "definitions": {"dist": "x", "m": "1"}}}
+    await client.create_build(
+        packages=[{url: "None"}],
+        platforms=["AlmaLinux-10"],
+        from_srpm=True,
+        add_epel_dist=True,
+        task_mock_options=opts,
+    )
+    task = client._http.post.call_args[1]["json"]["tasks"][0]
+    assert task["mock_options"] == {
+        "target_arch": "noarch",
+        "definitions": {"dist": ".el10_1.alma_altarch", "m": "1"},
+    }
+    assert opts[url]["definitions"] == {"dist": "x", "m": "1"}
+
+
+# ── build_configs ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_build_configs(client):
+    data = {"kernel": {"a*": {"secure_boot": True}}}
+    client._http.get = AsyncMock(return_value=_mock_response(data))
+    assert await client.get_build_configs() == data
+    assert client._http.get.call_args[0][0] == BUILD_CONFIGS_URL
+    assert "headers" not in client._http.get.call_args[1]
+
+
+@pytest.mark.asyncio
+async def test_get_build_configs_not_an_object(client):
+    client._http.get = AsyncMock(return_value=_mock_response([1, 2]))
+    with pytest.raises(ValueError):
+        await client.get_build_configs()
+
+
+def test_tag_branch():
+    assert tag_branch("imports/c8/sssd-2.9.4-5.el8") == "c8"
+    assert tag_branch("changed/a10-beta/openssh-9.9p1-20.el10_2.alma.1") == "a10-beta"
+    assert tag_branch("imports/c8-stream-1.24/nginx-1.24.0-3.el8") == "c8-stream-1.24"
+    assert tag_branch("v1.2.3") is None
+    assert tag_branch("release/1.0") is None
+
+
+def test_srpm_package_name():
+    assert srpm_package_name(
+        "https://x/Packages/g/gcc-toolset-14-gcc-14.2.1-1.el10.src.rpm"
+    ) == "gcc-toolset-14-gcc"
+    assert srpm_package_name("bash-5.2.32-2.el10.src.rpm") == "bash"
+    assert srpm_package_name("weird") == "weird"
+
+
+BUILD_CONFIGS = {
+    "java-21-openjdk": {
+        "*": {"platform_flavors": ["java-portable"]},
+        "*portable*": {"platform_flavors": ["java-portable"], "mock_options": {}},
+    },
+    "sssd": {"c8": {"x": 1}, "a8": {"x": 2}},
+    "dotnet8.0": {"c*": {"platform_flavors": ["dotnet-build"]}},
+}
+
+
+def test_match_build_config_most_specific_wins():
+    assert match_build_config(BUILD_CONFIGS, "java-21-openjdk", "a10-portable")[0] == "*portable*"
+    assert match_build_config(BUILD_CONFIGS, "java-21-openjdk", "a10")[0] == "*"
+
+
+def test_match_build_config_exact_and_none():
+    assert match_build_config(BUILD_CONFIGS, "sssd", "a8") == ("a8", {"x": 2})
+    assert match_build_config(BUILD_CONFIGS, "sssd", "a9") is None
+    assert match_build_config(BUILD_CONFIGS, "bash", "a9") is None
+    assert match_build_config(BUILD_CONFIGS, "dotnet8.0", "a9") is None
+    assert match_build_config(BUILD_CONFIGS, "dotnet8.0", "c9s")[0] == "c*"
+
+
+def test_match_build_config_case_sensitive():
+    assert match_build_config(BUILD_CONFIGS, "dotnet8.0", "C9s") is None
 
 
 # ── create_build: beta flavor ─────────────────────────────────────────

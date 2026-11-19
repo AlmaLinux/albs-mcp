@@ -734,6 +734,43 @@
         "The arch_list also contains the other AlmaLinux-10 arches (i686, x86_64, x86_64_v2, aarch64, ppc64le, s390x) — the user asked for riscv64 in addition, not instead"
       ],
       "files": []
+    },
+    {
+      "id": 57,
+      "name": "build_configs_applied_automatically",
+      "category": "build",
+      "prompt": "Build kernel and bash for AlmaLinux-9 from branch a9.",
+      "expected_output": "Agent calls create_build(packages=[\"kernel\", \"bash\"], platform=\"AlmaLinux-9\", branch=\"a9\") without looking up build_configs itself and without use_build_configs=False. The tool applies kernel's 'a*' secure_boot override and splits kernel into its own Secure Boot build; the agent reports both build IDs and the build_configs lines.",
+      "criteria": [
+        "The agent calls create_build once with both packages, branch a9, platform AlmaLinux-9",
+        "The agent does not pass use_build_configs=False and does not add secureboot / flavors / mock options taken from build_configs by hand",
+        "The agent tells the user every build ID in the result and what build_configs applied (kernel: secure_boot)"
+      ],
+      "files": []
+    },
+    {
+      "id": 58,
+      "name": "build_configs_opt_out_on_request",
+      "category": "build",
+      "prompt": "Build sssd for AlmaLinux-8 from branch a8, but without the build_configs overrides.",
+      "expected_output": "The user explicitly asked to skip build_configs, so the agent calls create_build(packages=[\"sssd\"], platform=\"AlmaLinux-8\", branch=\"a8\", use_build_configs=False).",
+      "criteria": [
+        "The agent calls create_build with use_build_configs=False",
+        "The agent does not pass use_build_configs=False when the user did not ask for it (contrast with the default build case)"
+      ],
+      "files": []
+    },
+    {
+      "id": 59,
+      "name": "build_configs_fetch_error",
+      "category": "build",
+      "prompt": "Build grub2 for AlmaLinux-10 from branch a10. (create_build answers: 'Error: could not read build_configs.json ...: network error. No build was created.')",
+      "expected_output": "No build was created. The agent reports the build_configs fetch error and asks the user whether to retry or build without build_configs; it does not silently retry with use_build_configs=False.",
+      "criteria": [
+        "The agent reports that no build was created because build_configs could not be read",
+        "The agent does not call create_build with use_build_configs=False without the user's consent"
+      ],
+      "files": []
     }
   ]
 }

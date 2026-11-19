@@ -181,6 +181,25 @@ EPEL_PLATFORM_FLAVORS: dict[str, list[str]] = {
 
 EPEL_DEFAULT_ARCH = ["x86_64_v2"]
 
+# ── Per-package build configs ─────────────────────────────────────────
+#
+# build_configs.json of git.almalinux.org/almalinux/build_configs: per-package
+# overrides keyed by source package name, then by an fnmatch pattern of the
+# git branch (the most specific pattern wins). Build-level fields:
+# platform_flavors, secure_boot, linked_builds; task-level: mock_options
+# (definitions, module_enable, yum_exclude, with, without, target_arch).
+# releng-monitoring applies it to every build it creates; create_build does
+# the same unless the caller turns it off.
+BUILD_CONFIGS_REPO = "https://git.almalinux.org/almalinux/build_configs"
+BUILD_CONFIGS_URL = f"{BUILD_CONFIGS_REPO}/raw/branch/main/build_configs.json"
+
+# Branch an EPEL SRPM build is matched with, per platform — the
+# build_configs_branch of the EPEL products in releng-monitoring.
+EPEL_BUILD_CONFIGS_BRANCH: dict[str, str] = {
+    "AlmaLinux-10": "almalinux-epel-10",
+    "AlmaLinux-Kitten-10": "kitten-epel-10",
+}
+
 # ── Beta flavor map ───────────────────────────────────────────────────
 #
 # Per-platform beta flavor names. Not every platform has a beta flavor

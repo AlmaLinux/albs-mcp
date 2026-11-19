@@ -135,6 +135,7 @@ def _cmd_create_build(args: argparse.Namespace) -> None:
         without_opts=args.without or None,
         modules=args.module or None,
         independent_tasks=args.independent_tasks,
+        use_build_configs=not args.no_build_configs,
     ))
 
 
@@ -457,6 +458,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Disable the per-platform sequential task chain so packages build "
             "independently / in parallel within each platform (default: chained)."
+        ),
+    )
+    p.add_argument(
+        "--no-build-configs", dest="no_build_configs", action="store_true",
+        help=(
+            "Do not apply the per-package overrides of "
+            "git.almalinux.org/almalinux/build_configs (applied by default)."
         ),
     )
     p.set_defaults(func=_cmd_create_build)

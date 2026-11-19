@@ -82,6 +82,12 @@ albs create-build AlmaLinux-9 bash --branch c9s --skip-tests
 # Independent tasks (packages build in parallel within the platform,
 # instead of the default sequential per-platform chain)
 albs create-build AlmaLinux-9 bash glibc openssl --branch c9s --independent-tasks
+
+# build_configs (git.almalinux.org/almalinux/build_configs) are applied
+# automatically: extra flavors, Secure Boot, linked builds, per-task mock
+# options. Packages needing different flavors / Secure Boot become separate
+# builds. Turn it off only when the user explicitly asks:
+albs create-build AlmaLinux-9 kernel --branch a9 --secureboot --no-build-configs
 ```
 
 ## Building modules

@@ -77,6 +77,21 @@ git_urls cannot be used with from_srpm.
 7. Use independent_tasks=True when the user wants packages in the build to start \
 in parallel within each platform instead of the default sequential chain. \
 The flag is applied to every platform entry in the payload.
+8. Per-package build overrides from build_configs \
+(https://git.almalinux.org/almalinux/build_configs) are checked and applied by \
+create_build itself — do NOT look them up or pass them by hand. For each package \
+it matches the branch (branch builds), the branch of an imports/<branch>/… or \
+changed/<branch>/… tag, or almalinux-epel-10 / kitten-epel-10 for EPEL SRPMs, \
+and adds the extra flavors, Secure Boot, linked builds and per-task \
+mock_options (definitions, module_enable, yum_exclude, with/without, \
+target_arch). Packages that need different flavors or Secure Boot are split \
+into separate builds (one call can return several build IDs). What the user \
+set explicitly wins: nosecureboot drops a config's Secure Boot, a definitions \
+key passed by the user is not overridden. Pass use_build_configs=False ONLY \
+when the user explicitly asks to build without build_configs. If the configs \
+cannot be fetched, no build is created — report it, do not retry with \
+use_build_configs=False on your own. Tell the user the "build_configs:" lines \
+of the result (what was applied, or that an entry could not be matched).
 
 ## Building modules (modular streams, requires JWT token)
 A module (e.g. perl-DBI:1.641, nodejs:20 on AlmaLinux-8/9) is built with \
@@ -553,8 +568,14 @@ async def create_build(
     without_opts: list[str] | None = None,
     modules: list[str] | None = None,
     independent_tasks: bool = False,
+    use_build_configs: bool = True,
 ) -> str:
     """Create a new build on ALBS. Requires JWT token.
+
+    Applies the per-package overrides of build_configs
+    (git.almalinux.org/almalinux/build_configs) automatically: extra flavors,
+    Secure Boot, linked builds and per-task mock_options. Packages needing
+    different flavors / Secure Boot are split into separate builds.
 
     Platforms and allowed architectures are fetched dynamically from ALBS.
     Use get_platforms to see available options.
@@ -605,6 +626,9 @@ async def create_build(
                            behavior chains task N's start on task N-1's
                            completion). Applied to every platform entry in
                            the payload. Default: False.
+        use_build_configs: Apply build_configs overrides (default True). Set
+                           False only when the user explicitly asks to build
+                           without them.
     """
     return await cmd.create_build(
         platform=platform,
@@ -629,6 +653,7 @@ async def create_build(
         without_opts=without_opts,
         modules=modules,
         independent_tasks=independent_tasks,
+        use_build_configs=use_build_configs,
     )
 
 

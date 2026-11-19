@@ -11,8 +11,13 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from albs_mcp.client import ALBSClient
-from albs_mcp.constants import LOG_ERROR_PATTERN, LOG_MAX_RESULT_CHARS, OPT_IN_ARCHES
+from albs_mcp.client import ALBSClient, match_build_config
+from albs_mcp.constants import (
+    EPEL_BUILD_CONFIGS_BRANCH,
+    LOG_ERROR_PATTERN,
+    LOG_MAX_RESULT_CHARS,
+    OPT_IN_ARCHES,
+)
 
 BUILD_ID = 52745
 # A long-since completed release — safe to read.
@@ -62,6 +67,38 @@ async def test_platform_arches_include_expected(client):
     al9 = arches.get("AlmaLinux-9", [])
     for expected in ["x86_64", "aarch64", "ppc64le", "s390x"]:
         assert expected in al9, f"{expected} not in AlmaLinux-9 arches"
+
+
+# ── build_configs ───────────────────────────────────────────────────
+
+BUILD_CONFIGS_FIELDS = {"platform_flavors", "secure_boot", "linked_builds", "mock_options"}
+
+
+@pytest.mark.asyncio
+async def test_build_configs_shape(client):
+    """build_configs.json is {package: {pattern: overrides}} with known fields."""
+    configs = await client.get_build_configs()
+    assert configs
+    for package, patterns in configs.items():
+        assert isinstance(patterns, dict) and patterns, package
+        for pattern, overrides in patterns.items():
+            assert isinstance(overrides, dict), (package, pattern)
+            unknown = set(overrides) - BUILD_CONFIGS_FIELDS
+            assert not unknown, (package, pattern, unknown)
+
+
+@pytest.mark.asyncio
+async def test_build_configs_kernel_secure_boot(client):
+    configs = await client.get_build_configs()
+    _, overrides = match_build_config(configs, "kernel", "a9")
+    assert overrides.get("secure_boot") is True
+
+
+@pytest.mark.asyncio
+async def test_epel_build_configs_platforms_exist(client):
+    arches = await client.get_platform_arches()
+    for platform in EPEL_BUILD_CONFIGS_BRANCH:
+        assert platform in arches, f"{platform} not on ALBS"
 
 
 @pytest.mark.asyncio
